@@ -264,6 +264,104 @@ static void handle_completions(socket_t sock, const char * body) {
     neuronos_gen_result_free(&result);
 }
 
+/* ---- SSE Streaming support ---- */
+
+typedef struct {
+    socket_t sock;
+    int n_tokens;
+} sse_stream_ctx_t;
+
+/* SSE streaming callback: sends each token as an SSE event */
+static bool sse_token_callback(const char * token_text, void * user_data) {
+    sse_stream_ctx_t * ctx = (sse_stream_ctx_t *)user_data;
+    if (!ctx || !token_text)
+        return false;
+
+    /* JSON-escape the token text */
+    char escaped[2048] = {0};
+    size_t j = 0;
+    for (size_t i = 0; token_text[i] && j < sizeof(escaped) - 8; i++) {
+        switch (token_text[i]) {
+            case '"':
+                escaped[j++] = '\\';
+                escaped[j++] = '"';
+                break;
+            case '\\':
+                escaped[j++] = '\\';
+                escaped[j++] = '\\';
+                break;
+            case '\n':
+                escaped[j++] = '\\';
+                escaped[j++] = 'n';
+                break;
+            case '\r':
+                escaped[j++] = '\\';
+                escaped[j++] = 'r';
+                break;
+            case '\t':
+                escaped[j++] = '\\';
+                escaped[j++] = 't';
+                break;
+            default:
+                escaped[j++] = token_text[i];
+                break;
+        }
+    }
+    escaped[j] = '\0';
+
+    /* OpenAI streaming format: data: {"choices":[{"delta":{"content":"..."}}]} */
+    char chunk[4096];
+    int len = snprintf(chunk, sizeof(chunk),
+                       "data: {\"id\":\"chatcmpl-neuronos\","
+                       "\"object\":\"chat.completion.chunk\","
+                       "\"model\":\"neuronos-local\","
+                       "\"choices\":[{"
+                       "\"index\":0,"
+                       "\"delta\":{\"content\":\"%s\"},"
+                       "\"finish_reason\":null"
+                       "}]}\n\n",
+                       escaped);
+
+    ssize_t sent = send(ctx->sock, chunk, (size_t)len, 0);
+    ctx->n_tokens++;
+
+    return (sent > 0);
+}
+
+/* Send SSE headers to start streaming */
+static void send_sse_headers(socket_t sock) {
+    const char * headers = "HTTP/1.1 200 OK\r\n"
+                           "Content-Type: text/event-stream\r\n"
+                           "Cache-Control: no-cache\r\n"
+                           "Connection: keep-alive\r\n"
+                           "Access-Control-Allow-Origin: *\r\n"
+                           "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                           "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+                           "\r\n";
+    send(sock, headers, strlen(headers), 0);
+}
+
+/* Detect "stream": true in JSON body */
+static bool json_get_bool(const char * json, const char * key, bool default_val) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char * found = strstr(json, pattern);
+    if (!found)
+        return default_val;
+    const char * colon = strchr(found + strlen(pattern), ':');
+    if (!colon)
+        return default_val;
+    /* skip whitespace */
+    colon++;
+    while (*colon == ' ' || *colon == '\t')
+        colon++;
+    if (strncmp(colon, "true", 4) == 0)
+        return true;
+    if (strncmp(colon, "false", 5) == 0)
+        return false;
+    return default_val;
+}
+
 static void handle_chat_completions(socket_t sock, const char * body) {
     if (!g_model) {
         send_json(sock, 503, "{\"error\":{\"message\":\"No model loaded\"}}");
@@ -278,45 +376,93 @@ static void handle_chat_completions(socket_t sock, const char * body) {
 
     int max_tokens = json_get_int(body, "max_tokens", 256);
     float temperature = json_get_float(body, "temperature", 0.7f);
+    bool stream = json_get_bool(body, "stream", false);
 
-    neuronos_gen_params_t gparams = {
-        .prompt = content,
-        .max_tokens = max_tokens,
-        .temperature = temperature,
-        .top_p = 0.95f,
-        .top_k = 40,
-        .grammar = NULL,
-        .on_token = NULL,
-        .user_data = NULL,
-        .seed = 0,
-    };
+    if (stream) {
+        /* ── SSE Streaming mode ── */
+        send_sse_headers(sock);
 
-    neuronos_gen_result_t result = neuronos_generate(g_model, gparams);
+        /* Send initial role delta */
+        const char * role_chunk = "data: {\"id\":\"chatcmpl-neuronos\","
+                                  "\"object\":\"chat.completion.chunk\","
+                                  "\"model\":\"neuronos-local\","
+                                  "\"choices\":[{"
+                                  "\"index\":0,"
+                                  "\"delta\":{\"role\":\"assistant\",\"content\":\"\"},"
+                                  "\"finish_reason\":null"
+                                  "}]}\n\n";
+        send(sock, role_chunk, strlen(role_chunk), 0);
 
-    if (result.status == NEURONOS_OK && result.text) {
-        char response[MAX_RESPONSE];
-        snprintf(response, sizeof(response),
-                 "{\"id\":\"chatcmpl-neuronos\","
-                 "\"object\":\"chat.completion\","
-                 "\"created\":%d,"
-                 "\"model\":\"neuronos-local\","
-                 "\"choices\":[{"
-                 "\"index\":0,"
-                 "\"message\":{\"role\":\"assistant\",\"content\":\"%.*s\"},"
-                 "\"finish_reason\":\"stop\""
-                 "}],"
-                 "\"usage\":{"
-                 "\"prompt_tokens\":0,"
-                 "\"completion_tokens\":%d,"
-                 "\"total_tokens\":%d"
-                 "}}",
-                 0, (int)(sizeof(response) - 512), result.text, result.n_tokens, result.n_tokens);
-        send_json(sock, 200, response);
+        sse_stream_ctx_t ctx = {.sock = sock, .n_tokens = 0};
+
+        neuronos_gen_params_t gparams = {
+            .prompt = content,
+            .max_tokens = max_tokens,
+            .temperature = temperature,
+            .top_p = 0.95f,
+            .top_k = 40,
+            .grammar = NULL,
+            .on_token = sse_token_callback,
+            .user_data = &ctx,
+            .seed = 0,
+        };
+
+        neuronos_gen_result_t result = neuronos_generate(g_model, gparams);
+
+        /* Send finish chunk */
+        const char * done_chunk = "data: {\"id\":\"chatcmpl-neuronos\","
+                                  "\"object\":\"chat.completion.chunk\","
+                                  "\"model\":\"neuronos-local\","
+                                  "\"choices\":[{"
+                                  "\"index\":0,"
+                                  "\"delta\":{},"
+                                  "\"finish_reason\":\"stop\""
+                                  "}]}\n\n"
+                                  "data: [DONE]\n\n";
+        send(sock, done_chunk, strlen(done_chunk), 0);
+
+        neuronos_gen_result_free(&result);
     } else {
-        send_json(sock, 500, "{\"error\":{\"message\":\"Generation failed\"}}");
-    }
+        /* ── Non-streaming mode (original) ── */
+        neuronos_gen_params_t gparams = {
+            .prompt = content,
+            .max_tokens = max_tokens,
+            .temperature = temperature,
+            .top_p = 0.95f,
+            .top_k = 40,
+            .grammar = NULL,
+            .on_token = NULL,
+            .user_data = NULL,
+            .seed = 0,
+        };
 
-    neuronos_gen_result_free(&result);
+        neuronos_gen_result_t result = neuronos_generate(g_model, gparams);
+
+        if (result.status == NEURONOS_OK && result.text) {
+            char response[MAX_RESPONSE];
+            snprintf(response, sizeof(response),
+                     "{\"id\":\"chatcmpl-neuronos\","
+                     "\"object\":\"chat.completion\","
+                     "\"created\":%d,"
+                     "\"model\":\"neuronos-local\","
+                     "\"choices\":[{"
+                     "\"index\":0,"
+                     "\"message\":{\"role\":\"assistant\",\"content\":\"%.*s\"},"
+                     "\"finish_reason\":\"stop\""
+                     "}],"
+                     "\"usage\":{"
+                     "\"prompt_tokens\":0,"
+                     "\"completion_tokens\":%d,"
+                     "\"total_tokens\":%d"
+                     "}}",
+                     0, (int)(sizeof(response) - 512), result.text, result.n_tokens, result.n_tokens);
+            send_json(sock, 200, response);
+        } else {
+            send_json(sock, 500, "{\"error\":{\"message\":\"Generation failed\"}}");
+        }
+
+        neuronos_gen_result_free(&result);
+    }
 }
 
 static void handle_root(socket_t sock) {
@@ -326,10 +472,11 @@ static void handle_root(socket_t sock) {
                         "<h1>NeuronOS v" NEURONOS_VERSION_STRING "</h1>"
                         "<p>The fastest AI agent engine. Universal. Offline. Any device.</p>"
                         "<pre>Endpoints:\n"
-                        "  POST /v1/chat/completions  - Chat API (OpenAI compatible)\n"
+                        "  POST /v1/chat/completions  - Chat API (OpenAI compatible, SSE streaming)\n"
                         "  POST /v1/completions       - Text completion\n"
                         "  GET  /v1/models            - List models\n"
                         "  GET  /health               - Health check\n"
+                        "\nStreaming: Set \"stream\": true for SSE token streaming\n"
                         "</pre></body></html>";
     send_response(sock, 200, "OK", "text/html", html, (int)strlen(html));
 }

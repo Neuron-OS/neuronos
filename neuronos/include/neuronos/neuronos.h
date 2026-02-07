@@ -1,6 +1,6 @@
 /* ============================================================
  * NeuronOS Agent Engine — Public API
- * Version 0.6.0
+ * Version 0.7.0
  *
  * The fastest AI agent engine in the world.
  * Universal, offline, runs on any device.
@@ -22,9 +22,9 @@ extern "C" {
 
 /* ---- Version ---- */
 #define NEURONOS_VERSION_MAJOR 0
-#define NEURONOS_VERSION_MINOR 6
+#define NEURONOS_VERSION_MINOR 7
 #define NEURONOS_VERSION_PATCH 0
-#define NEURONOS_VERSION_STRING "0.6.0"
+#define NEURONOS_VERSION_STRING "0.7.0"
 
 /* ---- Opaque types ---- */
 typedef struct neuronos_engine neuronos_engine_t;
@@ -182,6 +182,12 @@ int neuronos_tool_count(const neuronos_tool_registry_t * reg);
 
 /* Get tool name by index (for grammar generation) */
 const char * neuronos_tool_name(const neuronos_tool_registry_t * reg, int index);
+
+/* Get tool description by index (for MCP) */
+const char * neuronos_tool_description(const neuronos_tool_registry_t * reg, int index);
+
+/* Get tool JSON schema by index (for MCP) */
+const char * neuronos_tool_schema(const neuronos_tool_registry_t * reg, int index);
 
 /* Generate GBNF grammar rule for registered tool names */
 char * neuronos_tool_grammar_names(const neuronos_tool_registry_t * reg);
@@ -411,6 +417,25 @@ typedef struct {
 /* Start HTTP server (blocking). Returns status on exit. */
 neuronos_status_t neuronos_server_start(neuronos_model_t * model, neuronos_tool_registry_t * tools,
                                         neuronos_server_params_t params);
+
+/* ============================================================
+ * MCP SERVER (Model Context Protocol — STDIO transport)
+ *
+ * Exposes NeuronOS tools to any MCP client:
+ *   - Claude Desktop
+ *   - VS Code / GitHub Copilot
+ *   - Cursor, Windsurf, etc.
+ *
+ * Protocol: JSON-RPC 2.0 over stdin/stdout
+ * Spec: 2025-11-25
+ *
+ * First MCP server in pure C.
+ * ============================================================ */
+
+/* Start MCP server on STDIO (blocking). Reads JSON-RPC from stdin,
+ * writes responses to stdout. Logging goes to stderr.
+ * Returns NEURONOS_OK when stdin is closed. */
+neuronos_status_t neuronos_mcp_serve_stdio(neuronos_tool_registry_t * tools);
 
 #ifdef __cplusplus
 }

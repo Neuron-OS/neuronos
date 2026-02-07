@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "neuronos": {
+      "command": "./neuronos-cli",
+      "args": ["mcp"],
+      "env": {},
+      "description": "NeuronOS — The fastest AI agent engine. 7 built-in tools: shell, read_file, write_file, list_dir, search_files, http_get, calculate."
+    }
+  }
+}

@@ -1,11 +1,11 @@
 ##
-## NeuronOS — CMakeLists.txt  (v0.5.0)
+## NeuronOS — CMakeLists.txt  (v0.7.0)
 ##
 ## Builds the full NeuronOS Universal Agent Engine:
 ##   - HAL (Hardware Abstraction Layer)
 ##   - Engine (inference wrapper + HW detect + model selector + auto-tune)
 ##   - Agent (tool registry + ReAct loop)
-##   - Interface (HTTP server, future: WASM, mobile bridges)
+##   - Interface (HTTP server + MCP server)
 ##
 
 cmake_minimum_required(VERSION 3.14)
@@ -93,10 +93,11 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 # ═════════════════════════════════════════════════════════════
-# Layer 4: Interface — HTTP server (OpenAI-compatible API)
+# Layer 4: Interface — HTTP server + MCP server
 # ═════════════════════════════════════════════════════════════
 set(INTERFACE_SOURCES
     src/interface/neuronos_server.c
+    src/mcp/neuronos_mcp_server.c
 )
 
 add_library(neuronos_interface STATIC ${INTERFACE_SOURCES})

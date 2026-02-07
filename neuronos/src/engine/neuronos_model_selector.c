@@ -657,11 +657,17 @@ neuronos_tuned_params_t neuronos_auto_tune(const neuronos_hw_info_t * hw, const 
      * Prevents OS from swapping model pages during inference */
     t.use_mlock = (hw->ram_available_mb > model->est_ram_mb * 2 + 1024);
 
-    /* GPU layers: future — for now CPU only */
+    /* GPU layers: offload to GPU if available and model supports it.
+     * BitNet I2_S ternary models use CPU-only MAD kernels — GPU offload
+     * would bypass the ternary GEMM and fall back to slow dequant path.
+     * Only offload non-ternary (standard GGUF Q4/Q8/F16) models. */
     t.n_gpu_layers = 0;
-    if (hw->gpu_vram_mb > 0) {
+    bool is_ternary =
+        (strstr(model->name, "i2_s") || strstr(model->name, "I2_S") || strstr(model->name, "1.58") ||
+         strstr(model->name, "bitnet") || strstr(model->name, "BitNet") || strstr(model->name, "ternary"));
+    if (hw->gpu_vram_mb > 0 && !is_ternary) {
         /* Estimate: each layer ≈ model_size / n_layers
-         * For now, try to offload all if VRAM fits */
+         * Try to offload all if VRAM fits */
         int64_t est_model_vram = model->file_size_mb + 256; /* file + overhead */
         if (hw->gpu_vram_mb >= est_model_vram) {
             t.n_gpu_layers = 999; /* all layers */
@@ -669,6 +675,10 @@ neuronos_tuned_params_t neuronos_auto_tune(const neuronos_hw_info_t * hw, const 
             /* Partial offload: proportion that fits */
             t.n_gpu_layers = (int)(30 * hw->gpu_vram_mb / est_model_vram);
         }
+    } else if (hw->gpu_vram_mb > 0 && is_ternary) {
+        /* Ternary model: CPU-only inference (MAD kernel).
+         * GPU VRAM noted for future when BitNet adds GPU kernels. */
+        t.n_gpu_layers = 0;
     }
 
     return t;

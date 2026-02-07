@@ -1,5 +1,5 @@
 /* ============================================================
- * NeuronOS CLI v0.5.0 — Universal AI Agent Interface
+ * NeuronOS CLI v0.7.0 — Universal AI Agent Interface
  *
  * ZERO-ARG: Just run `neuronos` → auto-configures everything.
  * Detects hardware, finds best model, tunes params, starts REPL.
@@ -9,6 +9,7 @@
  *   neuronos run "prompt"           One-shot generation
  *   neuronos agent "task"           One-shot agent with tools
  *   neuronos serve                  HTTP server (OpenAI-compatible)
+ *   neuronos mcp                    MCP server (STDIO transport)
  *   neuronos hwinfo                 Show hardware capabilities
  *   neuronos scan [dir]             Scan for models
  *   neuronos <model.gguf> generate  Legacy mode
@@ -72,6 +73,7 @@ static void print_usage(const char * prog) {
             "  %s run \"prompt\"                  One-shot text generation\n"
             "  %s agent \"task\"                  One-shot agent with tools\n"
             "  %s serve [--port 8080]           HTTP server (OpenAI API)\n"
+            "  %s mcp                           MCP server (STDIO transport)\n"
             "  %s hwinfo                        Show hardware capabilities\n"
             "  %s scan [dir]                    Scan for GGUF models\n"
             "\n"
@@ -91,7 +93,7 @@ static void print_usage(const char * prog) {
             "  --port <port>    Server port (default: 8080)\n"
             "  --verbose        Show debug info\n"
             "  --help           Show this help\n",
-            NEURONOS_VERSION_STRING, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+            NEURONOS_VERSION_STRING, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* ---- Load grammar file ---- */
@@ -587,6 +589,14 @@ int main(int argc, char * argv[]) {
             .cors = true,
         };
         neuronos_status_t status = neuronos_server_start(ctx.model, NULL, sparams);
+        rc = (status == NEURONOS_OK) ? 0 : 1;
+    }
+    /* ── MCP: Model Context Protocol server (STDIO) ── */
+    else if (command && strcmp(command, "mcp") == 0) {
+        neuronos_tool_registry_t * mcp_tools = neuronos_tool_registry_create();
+        neuronos_tool_register_defaults(mcp_tools, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
+        neuronos_status_t status = neuronos_mcp_serve_stdio(mcp_tools);
+        neuronos_tool_registry_free(mcp_tools);
         rc = (status == NEURONOS_OK) ? 0 : 1;
     }
     /* ── AUTO (legacy compat): auto generate/agent ── */

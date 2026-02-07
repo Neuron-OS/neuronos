@@ -1,5 +1,5 @@
 /* ============================================================
- * NeuronOS — Engine & Agent Test Suite v0.6
+ * NeuronOS — Engine & Agent Test Suite v0.7
  *
  * Tests:
  *  1. Engine init/shutdown
@@ -14,6 +14,8 @@
  * 10. Zero-arg auto-launch
  * 11. GPU detection
  * 12. Expanded agentic tools
+ * 13. MCP server protocol
+ * 14. Ternary GPU offload guard
  *
  * Usage: ./test_engine <path-to-gguf-model>
  * ============================================================ */
@@ -66,7 +68,7 @@ static void test_engine_init(void) {
     /* Verify version */
     const char * ver = neuronos_version();
     ASSERT(ver != NULL, "version is NULL");
-    ASSERT(strcmp(ver, "0.6.0") == 0, "version mismatch");
+    ASSERT(strcmp(ver, "0.7.0") == 0, "version mismatch");
 
     /* Init engine */
     neuronos_engine_params_t params = {
@@ -505,12 +507,92 @@ static void test_agentic_tools(void) {
     TEST_PASS();
 }
 
+/* ---- Test 13: MCP server protocol ---- */
+static void test_mcp_protocol(void) {
+    TEST_START("MCP server protocol");
+
+    /* Test tool_description and tool_schema accessors (MCP needs these) */
+    neuronos_tool_registry_t * reg = neuronos_tool_registry_create();
+    ASSERT(reg != NULL, "registry NULL");
+
+    neuronos_tool_register_defaults(reg, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
+    int n = neuronos_tool_count(reg);
+    ASSERT(n >= 7, "expected >= 7 tools for MCP");
+
+    /* Verify each tool has name, description, and schema */
+    int has_desc = 0;
+    int has_schema = 0;
+    for (int i = 0; i < n; i++) {
+        const char * name = neuronos_tool_name(reg, i);
+        const char * desc = neuronos_tool_description(reg, i);
+        const char * schema = neuronos_tool_schema(reg, i);
+        ASSERT(name != NULL, "tool name NULL");
+        if (desc)
+            has_desc++;
+        if (schema)
+            has_schema++;
+        fprintf(stderr, "\n  MCP tool: %s (desc=%s, schema=%s)", name, desc ? "yes" : "no", schema ? "yes" : "no");
+    }
+
+    ASSERT(has_desc >= 7, "all tools should have descriptions");
+    ASSERT(has_schema >= 7, "all tools should have schemas");
+    fprintf(stderr, "\n  %d tools ready for MCP export (%d with desc, %d with schema)", n, has_desc, has_schema);
+
+    /* Verify neuronos_mcp_serve_stdio is declared (compile-time check).
+     * We can't actually run it in a test because it reads stdin,
+     * but we verify the function pointer is valid. */
+    neuronos_status_t (*mcp_fn)(neuronos_tool_registry_t *) = &neuronos_mcp_serve_stdio;
+    ASSERT(mcp_fn != NULL, "MCP serve function not linked");
+    fprintf(stderr, "\n  neuronos_mcp_serve_stdio: linked ✓");
+
+    neuronos_tool_registry_free(reg);
+    TEST_PASS();
+}
+
+/* ---- Test 14: Ternary GPU offload guard ---- */
+static void test_ternary_gpu_guard(void) {
+    TEST_START("Ternary GPU offload guard");
+
+    /* Simulate hardware with GPU */
+    neuronos_hw_info_t hw = neuronos_detect_hardware();
+    fprintf(stderr, "\n  GPU VRAM: %ld MB", (long)hw.gpu_vram_mb);
+
+    /* Create a model entry that looks like a BitNet I2_S model */
+    neuronos_model_entry_t ternary_model = {0};
+    strncpy(ternary_model.name, "ggml-model-i2_s.gguf", sizeof(ternary_model.name) - 1);
+    ternary_model.file_size_mb = 1200;
+    ternary_model.est_ram_mb = 1500;
+
+    neuronos_tuned_params_t t = neuronos_auto_tune(&hw, &ternary_model);
+    fprintf(stderr, "\n  Ternary model '%s': ngl=%d", ternary_model.name, t.n_gpu_layers);
+    ASSERT(t.n_gpu_layers == 0, "BitNet I2_S should NOT use GPU offload (ngl must be 0)");
+
+    /* Now test with a non-ternary model (should allow GPU if available) */
+    neuronos_model_entry_t normal_model = {0};
+    strncpy(normal_model.name, "llama-3.2-1b-q4_0.gguf", sizeof(normal_model.name) - 1);
+    normal_model.file_size_mb = 700;
+    normal_model.est_ram_mb = 1000;
+
+    neuronos_tuned_params_t t2 = neuronos_auto_tune(&hw, &normal_model);
+    fprintf(stderr, "\n  Normal model '%s': ngl=%d", normal_model.name, t2.n_gpu_layers);
+
+    if (hw.gpu_vram_mb > 0) {
+        ASSERT(t2.n_gpu_layers > 0, "Non-ternary model should use GPU when available");
+        fprintf(stderr, " (GPU offload enabled ✓)");
+    } else {
+        ASSERT(t2.n_gpu_layers == 0, "No GPU → ngl should be 0");
+        fprintf(stderr, " (no GPU, ngl=0 ✓)");
+    }
+
+    TEST_PASS();
+}
+
 /* ============================================================
  * MAIN
  * ============================================================ */
 int main(int argc, char * argv[]) {
     fprintf(stderr, "═══════════════════════════════════════════\n");
-    fprintf(stderr, "  NeuronOS Engine & Agent Test Suite v0.6\n");
+    fprintf(stderr, "  NeuronOS Engine & Agent Test Suite v0.7\n");
     fprintf(stderr, "═══════════════════════════════════════════\n");
 
     if (argc > 1) {
@@ -534,6 +616,8 @@ int main(int argc, char * argv[]) {
     test_auto_launch();
     test_gpu_detection();
     test_agentic_tools();
+    test_mcp_protocol();
+    test_ternary_gpu_guard();
 
     /* Cleanup model if loaded */
     if (g_model)

@@ -105,6 +105,18 @@ const char * neuronos_tool_name(const neuronos_tool_registry_t * reg, int index)
     return reg->tools[index].name;
 }
 
+const char * neuronos_tool_description(const neuronos_tool_registry_t * reg, int index) {
+    if (!reg || index < 0 || index >= reg->count)
+        return NULL;
+    return reg->tools[index].description;
+}
+
+const char * neuronos_tool_schema(const neuronos_tool_registry_t * reg, int index) {
+    if (!reg || index < 0 || index >= reg->count)
+        return NULL;
+    return reg->tools[index].args_schema_json;
+}
+
 /* ============================================================
  * GBNF GRAMMAR GENERATION
  * ============================================================ */
