@@ -33,6 +33,10 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|x86")
     list(APPEND HAL_SOURCES src/hal/hal_x86_avx2.c)
 endif()
 
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    list(APPEND HAL_SOURCES src/hal/hal_arm_neon.c)
+endif()
+
 add_library(neuronos_hal STATIC ${HAL_SOURCES})
 target_include_directories(neuronos_hal PUBLIC ${NEURONOS_INCLUDE_DIR})
 
@@ -42,6 +46,10 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|x86")
         set_source_files_properties(src/hal/hal_x86_avx2.c
             PROPERTIES COMPILE_FLAGS "-mavx2 -mssse3")
+    endif()
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+        set_source_files_properties(src/hal/hal_arm_neon.c
+            PROPERTIES COMPILE_FLAGS "-march=armv8-a+simd")
     endif()
 endif()
 
