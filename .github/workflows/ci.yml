@@ -60,7 +60,7 @@ jobs:
 
       - name: Build NeuronOS
         run: |
-          cd neuronos/neuronos
+          cd neuronos
           cmake -B build \
             -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
             -DCMAKE_C_COMPILER=clang
@@ -68,13 +68,13 @@ jobs:
 
       - name: Run HAL tests
         run: |
-          cd neuronos/neuronos/build
+          cd neuronos/build
           export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
           ./test_hal
 
       - name: Hardware info
         run: |
-          cd neuronos/neuronos/build
+          cd neuronos/build
           export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
           ./neuronos-cli hwinfo
 
@@ -91,7 +91,7 @@ jobs:
       - name: Run engine tests + benchmark
         if: hashFiles('models/ggml-model-i2_s.gguf') != ''
         run: |
-          cd neuronos/neuronos/build
+          cd neuronos/build
           export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
 
           echo "═══════════════════════════════════════"
@@ -99,7 +99,7 @@ jobs:
           echo "═══════════════════════════════════════"
 
           # Full engine test suite
-          ./test_engine ../../../models/$BITNET_MODEL_FILE 2>&1 | tee /tmp/bench.txt
+          ./test_engine ../../models/$BITNET_MODEL_FILE 2>&1 | tee /tmp/bench.txt
 
           # Extract key metrics
           echo ""
@@ -154,13 +154,13 @@ jobs:
 
       - name: Build NeuronOS
         run: |
-          cd neuronos/neuronos
+          cd neuronos
           cmake -B build -DCMAKE_BUILD_TYPE=$BUILD_TYPE
           cmake --build build -j$(nproc)
 
       - name: Run tests + hwinfo
         run: |
-          cd neuronos/neuronos/build
+          cd neuronos/build
           export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
           ./test_hal
           ./neuronos-cli hwinfo
@@ -203,7 +203,7 @@ jobs:
             cmake --build build -j$(nproc)
 
             # Build NeuronOS
-            cd neuronos/neuronos
+            cd neuronos
             cmake -B build -DCMAKE_BUILD_TYPE=Release
             cmake --build build -j$(nproc)
 
@@ -239,7 +239,7 @@ jobs:
 
       - name: Build NeuronOS with -Werror
         run: |
-          cd neuronos/neuronos
+          cd neuronos
           cmake -B build \
             -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
             -DCMAKE_C_COMPILER=clang \
