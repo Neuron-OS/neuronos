@@ -31,5 +31,16 @@
     #define PARALLEL_SIZE 4
 #endif // ACT_PARALLEL
 #endif // __ARM_FEATURE_DOTPROD
+#else
+// Scalar fallback for architectures without SIMD (RISC-V, WASM, generic)
+#if defined(ACT_PARALLEL)
+    #define ROW_BLOCK_SIZE 1
+    #define COL_BLOCK_SIZE 128
+    #define PARALLEL_SIZE 1
+#else
+    #define ROW_BLOCK_SIZE 128
+    #define COL_BLOCK_SIZE 32
+    #define PARALLEL_SIZE 1
+#endif // ACT_PARALLEL
 #endif // __AVX__
 

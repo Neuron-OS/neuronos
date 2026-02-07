@@ -157,7 +157,7 @@ static int cmd_agent(neuronos_model_t * model, const char * prompt, int max_toke
     }
 
     neuronos_tool_registry_t * tools = neuronos_tool_registry_create();
-    neuronos_tool_register_defaults(tools, NEURONOS_CAP_FILESYSTEM);
+    neuronos_tool_register_defaults(tools, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
 
     neuronos_agent_params_t aparams = {
         .max_steps = max_steps,
@@ -224,7 +224,7 @@ static int cmd_repl(neuronos_auto_ctx_t * ctx, int max_tokens, int max_steps, fl
 
     /* Tool registry for agent mode */
     neuronos_tool_registry_t * tools = neuronos_tool_registry_create();
-    neuronos_tool_register_defaults(tools, NEURONOS_CAP_FILESYSTEM);
+    neuronos_tool_register_defaults(tools, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
 
     bool agent_mode = false;
     char line[4096];

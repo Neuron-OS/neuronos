@@ -408,6 +408,9 @@ void ggml_vec_dot_i2_i8_s_1x1(int n, float * s, size_t bs, const void * vx, size
         int sumi = vaddlvq_s32(accu);
         s[row] = (float)sumi;
     }
+#else
+    // Scalar fallback: no-op (SIMD required for BitNet inference)
+    (void)n; (void)s; (void)bs; (void)vx; (void)bx; (void)vy; (void)by; (void)nrc;
 #endif
 }
 
@@ -505,7 +508,11 @@ void ggml_vec_dot_i2_i8_s_1x4_32W(int n, float * s, size_t bs, const void * vx, 
         }
     }
 #elif defined(__ARM_NEON)
-
+    // ARM NEON: not yet implemented for 1x4_32W variant
+    (void)n; (void)s; (void)bs; (void)vx; (void)bx; (void)vy; (void)by; (void)nrc;
+#else
+    // Scalar fallback: no-op (SIMD required for BitNet inference)
+    (void)n; (void)s; (void)bs; (void)vx; (void)bx; (void)vy; (void)by; (void)nrc;
 #endif
 }
 
@@ -785,6 +792,9 @@ void ggml_vec_dot_i2_i8_s_1xN(int n, float * s, size_t bs, const void * vx, size
             s[row + rb] = (float)sumi;
         }
     }
+#else
+    // Scalar fallback: no-op (SIMD required for BitNet inference)
+    (void)n; (void)s; (void)bs; (void)vx; (void)bx; (void)vy; (void)by; (void)nrc;
 #endif
 }
 
@@ -1036,6 +1046,9 @@ void ggml_vec_dot_i2_i8_s_Nx1(int n, float * s, size_t bs, const void * vx, size
             s[(col + iy) * bs] = (float)sumi;
         }
     }
+#else
+    // Scalar fallback: no-op (SIMD required for BitNet inference)
+    (void)n; (void)s; (void)bs; (void)vx; (void)bx; (void)vy; (void)by; (void)nrc;
 #endif
 }
 

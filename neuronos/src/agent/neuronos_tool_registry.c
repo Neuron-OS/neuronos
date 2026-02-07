@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <dirent.h>
+
 /* ---- Constants ---- */
 #define NEURONOS_MAX_TOOLS 64
 
@@ -441,6 +443,236 @@ static neuronos_tool_result_t tool_calculate(const char * args_json, void * user
 }
 
 /* ---- Register defaults ---- */
+
+/* --- list_dir tool --- */
+static neuronos_tool_result_t tool_list_dir(const char * args_json, void * user_data) {
+    (void)user_data;
+    neuronos_tool_result_t result = {0};
+
+    /* Extract "path" from JSON */
+    const char * path_start = strstr(args_json, "\"path\"");
+    if (!path_start) {
+        result.success = false;
+        result.error = strdup("Missing 'path' argument");
+        return result;
+    }
+    path_start = strchr(path_start + 6, '"');
+    if (!path_start) {
+        result.success = false;
+        result.error = strdup("Invalid 'path'");
+        return result;
+    }
+    path_start++;
+    const char * path_end = strchr(path_start, '"');
+    if (!path_end) {
+        result.success = false;
+        result.error = strdup("Invalid 'path'");
+        return result;
+    }
+
+    size_t plen = (size_t)(path_end - path_start);
+    char * path = malloc(plen + 1);
+    memcpy(path, path_start, plen);
+    path[plen] = '\0';
+
+    DIR * dir = opendir(path);
+    free(path);
+    if (!dir) {
+        result.success = false;
+        result.error = strdup("Cannot open directory");
+        return result;
+    }
+
+    /* Build JSON array of entries */
+    char buf[8192];
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "[");
+
+    struct dirent * entry;
+    int first = 1;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        if (!first)
+            pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, ",");
+        const char * type = (entry->d_type == DT_DIR) ? "dir" : "file";
+        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "{\"name\":\"%s\",\"type\":\"%s\"}", entry->d_name, type);
+        first = 0;
+        if (pos >= (int)sizeof(buf) - 100)
+            break;
+    }
+    closedir(dir);
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "]");
+
+    result.success = true;
+    result.output = strdup(buf);
+    return result;
+}
+
+/* --- search_files tool --- */
+static neuronos_tool_result_t tool_search_files(const char * args_json, void * user_data) {
+    (void)user_data;
+    neuronos_tool_result_t result = {0};
+
+    /* Extract "pattern" and optional "directory" */
+    const char * pat_start = strstr(args_json, "\"pattern\"");
+    if (!pat_start) {
+        result.success = false;
+        result.error = strdup("Missing 'pattern' argument");
+        return result;
+    }
+    pat_start = strchr(pat_start + 9, '"');
+    if (!pat_start) {
+        result.success = false;
+        result.error = strdup("Invalid 'pattern'");
+        return result;
+    }
+    pat_start++;
+    const char * pat_end = strchr(pat_start, '"');
+    if (!pat_end) {
+        result.success = false;
+        result.error = strdup("Invalid 'pattern'");
+        return result;
+    }
+
+    size_t plen = (size_t)(pat_end - pat_start);
+
+    /* Optional directory, default to "." */
+    const char * dir = ".";
+    char dir_buf[512] = ".";
+    const char * dir_start = strstr(args_json, "\"directory\"");
+    if (dir_start) {
+        dir_start = strchr(dir_start + 11, '"');
+        if (dir_start) {
+            dir_start++;
+            const char * dir_end = strchr(dir_start, '"');
+            if (dir_end) {
+                size_t dlen = (size_t)(dir_end - dir_start);
+                if (dlen < sizeof(dir_buf)) {
+                    memcpy(dir_buf, dir_start, dlen);
+                    dir_buf[dlen] = '\0';
+                }
+            }
+        }
+    }
+    dir = dir_buf;
+
+    /* Use find command for file search */
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "find \"%s\" -maxdepth 4 -name '%.*s' -type f 2>/dev/null | head -20", dir, (int)plen,
+             pat_start);
+
+    FILE * fp = popen(cmd, "r");
+    if (!fp) {
+        result.success = false;
+        result.error = strdup("find command failed");
+        return result;
+    }
+
+    char buf[4096];
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "[");
+    char line[512];
+    int first = 1;
+    while (fgets(line, (int)sizeof(line), fp) && pos < (int)sizeof(buf) - 100) {
+        size_t llen = strlen(line);
+        while (llen > 0 && (line[llen - 1] == '\n' || line[llen - 1] == '\r'))
+            line[--llen] = '\0';
+        if (llen == 0)
+            continue;
+        if (!first)
+            pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, ",");
+        pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "\"%s\"", line);
+        first = 0;
+    }
+    pclose(fp);
+    pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "]");
+
+    result.success = true;
+    result.output = strdup(buf);
+    return result;
+}
+
+/* --- http_get tool --- */
+static neuronos_tool_result_t tool_http_get(const char * args_json, void * user_data) {
+    (void)user_data;
+    neuronos_tool_result_t result = {0};
+
+    /* Extract "url" */
+    const char * url_start = strstr(args_json, "\"url\"");
+    if (!url_start) {
+        result.success = false;
+        result.error = strdup("Missing 'url' argument");
+        return result;
+    }
+    url_start = strchr(url_start + 5, '"');
+    if (!url_start) {
+        result.success = false;
+        result.error = strdup("Invalid 'url'");
+        return result;
+    }
+    url_start++;
+    const char * url_end = strchr(url_start, '"');
+    if (!url_end) {
+        result.success = false;
+        result.error = strdup("Invalid 'url'");
+        return result;
+    }
+
+    size_t ulen = (size_t)(url_end - url_start);
+
+    /* Validate URL starts with http:// or https:// */
+    if (ulen < 8 || (strncmp(url_start, "http://", 7) != 0 && strncmp(url_start, "https://", 8) != 0)) {
+        result.success = false;
+        result.error = strdup("URL must start with http:// or https://");
+        return result;
+    }
+
+    /* Use curl for HTTP request (timeout 10s, max 32KB) */
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+             "curl -sL --max-time 10 --max-filesize 32768 "
+             "-H 'User-Agent: NeuronOS/%s' '%.*s' 2>/dev/null | head -c 32768",
+             NEURONOS_VERSION_STRING, (int)ulen, url_start);
+
+    FILE * fp = popen(cmd, "r");
+    if (!fp) {
+        result.success = false;
+        result.error = strdup("curl not available");
+        return result;
+    }
+
+    /* Read response (max 32KB) */
+    char * buf = malloc(32769);
+    if (!buf) {
+        pclose(fp);
+        result.success = false;
+        result.error = strdup("Memory allocation failed");
+        return result;
+    }
+
+    size_t total = 0;
+    size_t n;
+    while ((n = fread(buf + total, 1, 32768 - total, fp)) > 0) {
+        total += n;
+        if (total >= 32768)
+            break;
+    }
+    buf[total] = '\0';
+    pclose(fp);
+
+    if (total == 0) {
+        free(buf);
+        result.success = false;
+        result.error = strdup("Empty response or connection failed");
+        return result;
+    }
+
+    result.success = true;
+    result.output = buf;
+    return result;
+}
+
 int neuronos_tool_register_defaults(neuronos_tool_registry_t * reg, uint32_t allowed_caps) {
     if (!reg)
         return -1;
@@ -483,6 +715,46 @@ int neuronos_tool_register_defaults(neuronos_tool_registry_t * reg, uint32_t all
             .required_caps = NEURONOS_CAP_FILESYSTEM,
         };
         if (neuronos_tool_register(reg, &desc_write) == 0)
+            registered++;
+
+        neuronos_tool_desc_t desc_list_dir = {
+            .name = "list_dir",
+            .description = "List files and directories in a path.",
+            .args_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":"
+                                "\"Directory path to list\"}},\"required\":[\"path\"]}",
+            .execute = tool_list_dir,
+            .user_data = NULL,
+            .required_caps = NEURONOS_CAP_FILESYSTEM,
+        };
+        if (neuronos_tool_register(reg, &desc_list_dir) == 0)
+            registered++;
+
+        neuronos_tool_desc_t desc_search = {
+            .name = "search_files",
+            .description = "Search for files by name pattern (glob). Returns matching paths.",
+            .args_schema_json =
+                "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"File name "
+                "pattern, e.g. *.py, *.c, config*\"},\"directory\":{\"type\":\"string\",\"description\":\"Root "
+                "directory to search (default: .)\"}},\"required\":[\"pattern\"]}",
+            .execute = tool_search_files,
+            .user_data = NULL,
+            .required_caps = NEURONOS_CAP_FILESYSTEM,
+        };
+        if (neuronos_tool_register(reg, &desc_search) == 0)
+            registered++;
+    }
+
+    if (allowed_caps & NEURONOS_CAP_NETWORK) {
+        neuronos_tool_desc_t desc_http = {
+            .name = "http_get",
+            .description = "Fetch content from a URL via HTTP GET (max 32KB, 10s timeout).",
+            .args_schema_json = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":"
+                                "\"URL to fetch (http:// or https://)\"}},\"required\":[\"url\"]}",
+            .execute = tool_http_get,
+            .user_data = NULL,
+            .required_caps = NEURONOS_CAP_NETWORK,
+        };
+        if (neuronos_tool_register(reg, &desc_http) == 0)
             registered++;
     }
 

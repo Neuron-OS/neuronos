@@ -194,9 +194,172 @@ neuronos_hw_info_t neuronos_detect_hardware(void) {
     hw.features = (1 << 8); /* NEON is always available on aarch64 */
 #endif
 
-    /* ---- GPU (stub for now) ---- */
+    /* ---- GPU Detection ---- */
+    /* Try multiple methods to detect GPU and VRAM */
     hw.gpu_vram_mb = 0;
     hw.gpu_name[0] = '\0';
+
+#ifdef __linux__
+    /* Method 1: NVIDIA GPU via nvidia-smi */
+    {
+        FILE * fp = popen("nvidia-smi --query-gpu=name,memory.total "
+                          "--format=csv,noheader,nounits 2>/dev/null",
+                          "r");
+        if (fp) {
+            char line[256] = {0};
+            if (fgets(line, sizeof(line), fp)) {
+                /* Format: "NVIDIA GeForce RTX 3050 Laptop GPU, 4096" */
+                char * comma = strchr(line, ',');
+                if (comma) {
+                    *comma = '\0';
+                    snprintf(hw.gpu_name, sizeof(hw.gpu_name), "%s", line);
+                    /* Trim trailing whitespace from name */
+                    size_t nlen = strlen(hw.gpu_name);
+                    while (nlen > 0 && (hw.gpu_name[nlen - 1] == ' ' || hw.gpu_name[nlen - 1] == '\n'))
+                        hw.gpu_name[--nlen] = '\0';
+                    hw.gpu_vram_mb = atoll(comma + 1);
+                }
+            }
+            pclose(fp);
+        }
+    }
+
+    /* Method 2: AMD GPU via sysfs (if NVIDIA not found) */
+    if (hw.gpu_vram_mb == 0) {
+        /* Check /sys/class/drm/cardN/device/ for AMD GPU */
+        DIR * drm_dir = opendir("/sys/class/drm");
+        if (drm_dir) {
+            struct dirent * de;
+            while ((de = readdir(drm_dir)) != NULL) {
+                if (strncmp(de->d_name, "card", 4) != 0)
+                    continue;
+                /* Skip render nodes */
+                if (strchr(de->d_name, '-'))
+                    continue;
+
+                char vram_path[512];
+                snprintf(vram_path, sizeof(vram_path), "/sys/class/drm/%s/device/mem_info_vram_total", de->d_name);
+                FILE * fp = fopen(vram_path, "r");
+                if (fp) {
+                    char val[64] = {0};
+                    if (fgets(val, sizeof(val), fp)) {
+                        int64_t vram_bytes = atoll(val);
+                        hw.gpu_vram_mb = vram_bytes / (1024 * 1024);
+                    }
+                    fclose(fp);
+
+                    /* Try to get GPU name from product file */
+                    char name_path[512];
+                    snprintf(name_path, sizeof(name_path), "/sys/class/drm/%s/device/product_name", de->d_name);
+                    FILE * nfp = fopen(name_path, "r");
+                    if (nfp) {
+                        if (fgets(hw.gpu_name, (int)sizeof(hw.gpu_name), nfp)) {
+                            size_t nlen = strlen(hw.gpu_name);
+                            while (nlen > 0 && (hw.gpu_name[nlen - 1] == '\n' || hw.gpu_name[nlen - 1] == ' '))
+                                hw.gpu_name[--nlen] = '\0';
+                        }
+                        fclose(nfp);
+                    }
+                    if (hw.gpu_vram_mb > 0)
+                        break; /* Found a GPU with VRAM */
+                }
+            }
+            closedir(drm_dir);
+        }
+    }
+
+    /* Method 3: Intel GPU via lspci (if no dedicated GPU)  */
+    if (hw.gpu_vram_mb == 0) {
+        FILE * fp = popen("lspci 2>/dev/null | grep -i 'vga\\|3d\\|display' | head -1", "r");
+        if (fp) {
+            char line[256] = {0};
+            if (fgets(line, sizeof(line), fp)) {
+                /* Just store the name, no VRAM info available for integrated */
+                char * colon = strrchr(line, ':');
+                if (colon) {
+                    colon++;
+                    while (*colon == ' ')
+                        colon++;
+                    size_t nlen = strlen(colon);
+                    while (nlen > 0 && (colon[nlen - 1] == '\n' || colon[nlen - 1] == ' '))
+                        nlen--;
+                    if (nlen >= sizeof(hw.gpu_name))
+                        nlen = sizeof(hw.gpu_name) - 1;
+                    memcpy(hw.gpu_name, colon, nlen);
+                    hw.gpu_name[nlen] = '\0';
+                    /* Integrated GPUs share system RAM — estimate 25% */
+                    /* hw.gpu_vram_mb stays 0 (no dedicated VRAM) */
+                }
+            }
+            pclose(fp);
+        }
+    }
+#elif defined(__APPLE__)
+    /* macOS: Metal GPU detection via system_profiler */
+    {
+        FILE * fp = popen("system_profiler SPDisplaysDataType 2>/dev/null "
+                          "| grep -A2 'Chipset\\|VRAM' | head -6",
+                          "r");
+        if (fp) {
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strstr(line, "Chipset") || strstr(line, "Chip")) {
+                    char * val = strchr(line, ':');
+                    if (val) {
+                        val++;
+                        while (*val == ' ')
+                            val++;
+                        size_t nlen = strlen(val);
+                        while (nlen > 0 && (val[nlen - 1] == '\n' || val[nlen - 1] == ' '))
+                            nlen--;
+                        if (nlen >= sizeof(hw.gpu_name))
+                            nlen = sizeof(hw.gpu_name) - 1;
+                        memcpy(hw.gpu_name, val, nlen);
+                        hw.gpu_name[nlen] = '\0';
+                    }
+                }
+                if (strstr(line, "VRAM") || strstr(line, "Memory")) {
+                    char * val = strchr(line, ':');
+                    if (val) {
+                        hw.gpu_vram_mb = atoll(val + 1);
+                        /* Could be in GB */
+                        if (hw.gpu_vram_mb < 64)
+                            hw.gpu_vram_mb *= 1024;
+                    }
+                }
+            }
+            pclose(fp);
+        }
+    }
+#elif defined(_WIN32)
+    /* Windows: try wmic */
+    {
+        FILE * fp = _popen("wmic path win32_VideoController get Name,AdapterRAM /format:csv 2>nul", "r");
+        if (fp) {
+            char line[512];
+            /* Skip header */
+            fgets(line, sizeof(line), fp);
+            fgets(line, sizeof(line), fp);
+            if (fgets(line, sizeof(line), fp)) {
+                /* CSV: Node,AdapterRAM,Name */
+                char * tok = strtok(line, ",");
+                tok = strtok(NULL, ","); /* AdapterRAM */
+                if (tok) {
+                    int64_t adapter_ram = atoll(tok);
+                    hw.gpu_vram_mb = adapter_ram / (1024 * 1024);
+                }
+                tok = strtok(NULL, ","); /* Name */
+                if (tok) {
+                    snprintf(hw.gpu_name, sizeof(hw.gpu_name), "%s", tok);
+                    size_t nlen = strlen(hw.gpu_name);
+                    while (nlen > 0 && (hw.gpu_name[nlen - 1] == '\n' || hw.gpu_name[nlen - 1] == '\r'))
+                        hw.gpu_name[--nlen] = '\0';
+                }
+            }
+            _pclose(fp);
+        }
+    }
+#endif
 
     return hw;
 }

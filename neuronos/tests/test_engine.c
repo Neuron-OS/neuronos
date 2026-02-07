@@ -1,5 +1,5 @@
 /* ============================================================
- * NeuronOS — Engine & Agent Test Suite v0.5
+ * NeuronOS — Engine & Agent Test Suite v0.6
  *
  * Tests:
  *  1. Engine init/shutdown
@@ -12,6 +12,8 @@
  *  8. Model scanner
  *  9. Auto-tuning engine
  * 10. Zero-arg auto-launch
+ * 11. GPU detection
+ * 12. Expanded agentic tools
  *
  * Usage: ./test_engine <path-to-gguf-model>
  * ============================================================ */
@@ -64,7 +66,7 @@ static void test_engine_init(void) {
     /* Verify version */
     const char * ver = neuronos_version();
     ASSERT(ver != NULL, "version is NULL");
-    ASSERT(strcmp(ver, "0.5.0") == 0, "version mismatch");
+    ASSERT(strcmp(ver, "0.6.0") == 0, "version mismatch");
 
     /* Init engine */
     neuronos_engine_params_t params = {
@@ -431,11 +433,84 @@ static void test_auto_launch(void) {
 }
 
 /* ============================================================
+ * TEST 11: GPU Detection
+ * ============================================================ */
+static void test_gpu_detection(void) {
+    TEST_START("GPU detection");
+
+    neuronos_hw_info_t hw = neuronos_detect_hardware();
+
+    /* GPU detection should work without crashing */
+    /* On CI, there may not be a GPU, so we just validate the fields */
+    ASSERT(hw.gpu_vram_mb >= 0, "gpu_vram_mb negative");
+
+    if (hw.gpu_vram_mb > 0) {
+        fprintf(stderr, "\n  GPU: %s (%lld MB VRAM)", hw.gpu_name, (long long)hw.gpu_vram_mb);
+        ASSERT(strlen(hw.gpu_name) > 0, "GPU name empty but VRAM detected");
+    } else {
+        fprintf(stderr, "\n  GPU: none detected (CPU-only inference)");
+        if (strlen(hw.gpu_name) > 0) {
+            fprintf(stderr, "\n  Integrated: %s", hw.gpu_name);
+        }
+    }
+
+    /* Verify model budget accounts for GPU if present */
+    ASSERT(hw.model_budget_mb > 0, "model_budget_mb should be positive");
+
+    TEST_PASS();
+}
+
+/* ============================================================
+ * TEST 12: Expanded Agentic Tools
+ * ============================================================ */
+static void test_agentic_tools(void) {
+    TEST_START("Expanded agentic tools");
+
+    neuronos_tool_registry_t * reg = neuronos_tool_registry_create();
+    ASSERT(reg != NULL, "registry NULL");
+
+    /* Register all tools including network and shell */
+    int n = neuronos_tool_register_defaults(reg, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
+    fprintf(stderr, "\n  Registered %d tools:", n);
+    ASSERT(n >= 7, "expected at least 7 tools");
+
+    /* Print all tool names */
+    for (int i = 0; i < neuronos_tool_count(reg); i++) {
+        fprintf(stderr, " %s", neuronos_tool_name(reg, i));
+    }
+
+    /* Test list_dir tool */
+    neuronos_tool_result_t r = neuronos_tool_execute(reg, "list_dir", "{\"path\":\".\"}");
+    ASSERT(r.success, "list_dir failed");
+    ASSERT(r.output != NULL && r.output[0] == '[', "list_dir should return JSON array");
+    fprintf(stderr, "\n  list_dir(.) = %.*s...", 60, r.output);
+    neuronos_tool_result_free(&r);
+
+    /* Test search_files tool */
+    r = neuronos_tool_execute(reg, "search_files", "{\"pattern\":\"*.c\",\"directory\":\".\"}");
+    ASSERT(r.success, "search_files failed");
+    fprintf(stderr, "\n  search_files(*.c) = %.*s...", 60, r.output ? r.output : "(empty)");
+    neuronos_tool_result_free(&r);
+
+    /* Generate grammar for all tools */
+    char * grammar = neuronos_tool_grammar_names(reg);
+    ASSERT(grammar != NULL, "grammar NULL");
+    ASSERT(strstr(grammar, "list_dir") != NULL, "grammar missing list_dir");
+    ASSERT(strstr(grammar, "http_get") != NULL, "grammar missing http_get");
+    ASSERT(strstr(grammar, "search_files") != NULL, "grammar missing search_files");
+    fprintf(stderr, "\n  Grammar: %s", grammar);
+    free(grammar);
+
+    neuronos_tool_registry_free(reg);
+    TEST_PASS();
+}
+
+/* ============================================================
  * MAIN
  * ============================================================ */
 int main(int argc, char * argv[]) {
     fprintf(stderr, "═══════════════════════════════════════════\n");
-    fprintf(stderr, "  NeuronOS Engine & Agent Test Suite v0.5\n");
+    fprintf(stderr, "  NeuronOS Engine & Agent Test Suite v0.6\n");
     fprintf(stderr, "═══════════════════════════════════════════\n");
 
     if (argc > 1) {
@@ -457,6 +532,8 @@ int main(int argc, char * argv[]) {
     test_model_scanner();
     test_auto_tune();
     test_auto_launch();
+    test_gpu_detection();
+    test_agentic_tools();
 
     /* Cleanup model if loaded */
     if (g_model)

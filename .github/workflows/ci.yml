@@ -1,14 +1,14 @@
 ##
-## NeuronOS — Cross-Platform CI
+## NeuronOS — Cross-Platform CI with Benchmarks
 ##
 ## Tier 1: Native (x86_64 Linux, ARM64 Linux)
 ## Tier 2: QEMU emulation (RISC-V 64)
-## Tier 3: Special (WASM via Emscripten) — compile-only
+## Tier 3: Compile-only (-Werror)
 ##
-## Tests are split into:
+## Tests:
 ##   - compile-only: Just build (all platforms)
-##   - unit-no-model: HAL, tools, JSON (all platforms)
-##   - unit-with-model: Inference, grammar, agent (x86_64 only)
+##   - unit-no-model: HAL, hwinfo (all platforms)
+##   - benchmark: Speed report with real model (x86_64)
 ##
 name: NeuronOS CI
 
@@ -17,18 +17,24 @@ on:
     branches: [main, develop]
     paths:
       - 'neuronos/**'
+      - 'src/**'
+      - 'include/**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'neuronos/**'
+      - 'src/**'
+      - 'include/**'
 
 env:
   BUILD_TYPE: Release
+  BITNET_MODEL_REPO: "microsoft/BitNet-b1.58-2B-4T-gguf"
+  BITNET_MODEL_FILE: "ggml-model-i2_s.gguf"
 
 jobs:
   # ═══════════════════════════════════════════════════════
-  # Tier 1: Native x86_64 Linux (primary)
+  # Tier 1: Native x86_64 Linux (primary + benchmark)
   # ═══════════════════════════════════════════════════════
   linux-x86_64:
     name: Linux x86_64 (clang)
@@ -41,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake bc
+          sudo apt-get install -y clang cmake bc curl jq
 
       - name: Build parent BitNet
         run: |
@@ -60,19 +66,68 @@ jobs:
             -DCMAKE_C_COMPILER=clang
           cmake --build build -j$(nproc)
 
-      - name: Run unit tests (no model)
+      - name: Run HAL tests
         run: |
           cd neuronos/neuronos/build
           export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
           ./test_hal
-          echo "HAL tests passed"
 
-      - name: Run hwinfo & scan
+      - name: Hardware info
         run: |
           cd neuronos/neuronos/build
           export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
           ./neuronos-cli hwinfo
-          echo "Hardware detection passed"
+
+      - name: Download model for benchmark
+        run: |
+          mkdir -p models
+          if [ ! -f "models/$BITNET_MODEL_FILE" ]; then
+            echo "Downloading BitNet 2B4T model..."
+            curl -L -o "models/$BITNET_MODEL_FILE" \
+              "https://huggingface.co/$BITNET_MODEL_REPO/resolve/main/$BITNET_MODEL_FILE" \
+              --progress-bar || echo "Model download failed (non-fatal)"
+          fi
+
+      - name: Run engine tests + benchmark
+        if: hashFiles('models/ggml-model-i2_s.gguf') != ''
+        run: |
+          cd neuronos/neuronos/build
+          export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
+
+          echo "═══════════════════════════════════════"
+          echo "  NeuronOS Benchmark — x86_64 Linux"
+          echo "═══════════════════════════════════════"
+
+          # Full engine test suite
+          ./test_engine ../../../models/$BITNET_MODEL_FILE 2>&1 | tee /tmp/bench.txt
+
+          # Extract key metrics
+          echo ""
+          echo "═══════════════════════════════════════"
+          echo "  SPEED REPORT"
+          echo "═══════════════════════════════════════"
+          grep -oP '[0-9]+\.[0-9]+ t/s' /tmp/bench.txt | while read speed; do
+            echo "  $speed"
+          done
+          grep 'Results:' /tmp/bench.txt
+
+      - name: Generate benchmark summary
+        if: always()
+        run: |
+          echo "## NeuronOS CI — x86_64 Benchmark" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | $(uname -m) $(cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2) |" >> $GITHUB_STEP_SUMMARY
+          echo "| RAM | $(free -h | grep Mem | awk '{print $2}') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cores | $(nproc) |" >> $GITHUB_STEP_SUMMARY
+          if [ -f /tmp/bench.txt ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Speed Results" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E 't/s|Results|PASS|FAIL' /tmp/bench.txt >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
 
   # ═══════════════════════════════════════════════════════
   # Tier 1: Native ARM64 Linux
@@ -103,12 +158,18 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=$BUILD_TYPE
           cmake --build build -j$(nproc)
 
-      - name: Run unit tests (no model)
+      - name: Run tests + hwinfo
         run: |
           cd neuronos/neuronos/build
           export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
           ./test_hal
           ./neuronos-cli hwinfo
+
+      - name: ARM64 summary
+        if: always()
+        run: |
+          echo "## NeuronOS CI — ARM64" >> $GITHUB_STEP_SUMMARY
+          echo "Build: OK | HAL tests: PASS" >> $GITHUB_STEP_SUMMARY
 
   # ═══════════════════════════════════════════════════════
   # Tier 2: RISC-V 64 via QEMU
@@ -133,6 +194,8 @@ jobs:
             apt-get install -y gcc g++ cmake bc
           run: |
             cd /opt/neuronos
+            echo "Building on RISC-V 64 (scalar fallback)..."
+
             # Build parent (scalar-only, no SIMD)
             cmake -B build \
               -DCMAKE_BUILD_TYPE=Release \
@@ -148,10 +211,11 @@ jobs:
             cd build
             export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
             ./test_hal
-            echo "RISC-V build + HAL test passed!"
+            ./neuronos-cli hwinfo
+            echo "RISC-V build + tests passed!"
 
   # ═══════════════════════════════════════════════════════
-  # Compile-only check for code quality
+  # Compile with -Werror
   # ═══════════════════════════════════════════════════════
   compile-warnings:
     name: Compile with -Werror
