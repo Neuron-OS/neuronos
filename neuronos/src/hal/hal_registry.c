@@ -74,7 +74,7 @@ static uint32_t detect_x86_features(void) {
         if (info[1] & (1 << 16))
             features |= NEURONOS_FEAT_AVX512F;
 
-        /* AVX-VNNI: CPUID.7.1:EAX[4] */
+        /* AVX-VNNI: CPUID.7.1:EAX[4] (0x10) */
         cpuidex(info, 7, 1);
         if (info[0] & (1 << 4))
             features |= NEURONOS_FEAT_AVX_VNNI;
@@ -154,33 +154,36 @@ static uint32_t detect_hardware_features(void) {
 /* These are defined in the per-ISA source files */
 extern const neuronos_backend_t neuronos_backend_scalar;
 
-#if defined(__AVX2__)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 extern const neuronos_backend_t neuronos_backend_x86_avx2;
+extern const neuronos_backend_t neuronos_backend_x86_avxvnni;
 #endif
-
-#if defined(__ARM_NEON)
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON)
 extern const neuronos_backend_t neuronos_backend_arm_neon;
 #endif
 
 /* ──────────────────────────── HAL API implementation ────────────── */
 
-neuronos_status_t neuronos_hal_init(void) {
+neuronos_hal_status_t neuronos_hal_init(void) {
     if (g_hal.initialized) {
-        return NEURONOS_OK;
+        return NEURONOS_HAL_OK;
     }
 
     g_hal.count = 0;
     g_hal.active_index = -1;
     g_hal.hw_features = detect_hardware_features();
+    printf("[HAL] Detected features: 0x%08X\n", g_hal.hw_features);
 
     /* Register built-in backends */
+    printf("[HAL] Registering backends...\n");
     neuronos_hal_register_backend(&neuronos_backend_scalar);
 
-#if defined(__AVX2__)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     neuronos_hal_register_backend(&neuronos_backend_x86_avx2);
+    neuronos_hal_register_backend(&neuronos_backend_x86_avxvnni);
 #endif
 
-#if defined(__ARM_NEON)
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON)
     neuronos_hal_register_backend(&neuronos_backend_arm_neon);
 #endif
 
@@ -203,23 +206,25 @@ neuronos_status_t neuronos_hal_init(void) {
     }
 
     if (best_index < 0) {
-        return NEURONOS_ERR_NO_BACKEND;
+        printf("[HAL] Error: No suitable backend found (features 0x%X)\n", g_hal.hw_features);
+        return NEURONOS_HAL_ERR_NO_BACKEND;
     }
+    printf("[HAL] Selected best backend: index %d (%s)\n", best_index, g_hal.backends[best_index].name);
 
     /* Initialize the selected backend */
     g_hal.active_index = best_index;
     neuronos_backend_t * active = &g_hal.backends[best_index];
 
     if (active->init) {
-        neuronos_status_t st = active->init();
-        if (st != NEURONOS_OK) {
+        neuronos_hal_status_t st = active->init();
+        if (st != NEURONOS_HAL_OK) {
             g_hal.active_index = -1;
             return st;
         }
     }
 
     g_hal.initialized = true;
-    return NEURONOS_OK;
+    return NEURONOS_HAL_OK;
 }
 
 void neuronos_hal_shutdown(void) {
@@ -238,19 +243,20 @@ uint32_t neuronos_hal_get_features(void) {
     return g_hal.hw_features;
 }
 
-neuronos_status_t neuronos_hal_register_backend(const neuronos_backend_t * backend) {
+neuronos_hal_status_t neuronos_hal_register_backend(const neuronos_backend_t * backend) {
     if (!backend || !backend->name || !backend->vec_dot_i2_i8 || !backend->quantize_i2) {
-        return NEURONOS_ERR_INVALID;
+        return NEURONOS_HAL_ERR_INVALID;
     }
     if (g_hal.count >= NEURONOS_MAX_BACKENDS) {
-        return NEURONOS_ERR_INVALID;
+        return NEURONOS_HAL_ERR_INVALID;
     }
 
     /* Copy descriptor */
     memcpy(&g_hal.backends[g_hal.count], backend, sizeof(neuronos_backend_t));
+    printf("[HAL] Registered backend [%d]: %s (feat: 0x%X)\n", g_hal.count, backend->name, backend->required_features);
     g_hal.count++;
 
-    return NEURONOS_OK;
+    return NEURONOS_HAL_OK;
 }
 
 const neuronos_backend_t * neuronos_hal_get_active_backend(void) {
@@ -259,12 +265,12 @@ const neuronos_backend_t * neuronos_hal_get_active_backend(void) {
     return &g_hal.backends[g_hal.active_index];
 }
 
-neuronos_status_t neuronos_hal_select_backend(neuronos_backend_type_t type) {
+neuronos_hal_status_t neuronos_hal_select_backend(neuronos_backend_type_t type) {
     for (int i = 0; i < g_hal.count; i++) {
         if (g_hal.backends[i].type == type) {
             /* Check features */
             if ((g_hal.backends[i].required_features & g_hal.hw_features) != g_hal.backends[i].required_features) {
-                return NEURONOS_ERR_UNSUPPORTED;
+                return NEURONOS_HAL_ERR_UNSUPPORTED;
             }
 
             /* Shutdown old backend */
@@ -274,16 +280,16 @@ neuronos_status_t neuronos_hal_select_backend(neuronos_backend_type_t type) {
 
             /* Init new backend */
             if (g_hal.backends[i].init) {
-                neuronos_status_t st = g_hal.backends[i].init();
-                if (st != NEURONOS_OK)
+                neuronos_hal_status_t st = g_hal.backends[i].init();
+                if (st != NEURONOS_HAL_OK)
                     return st;
             }
 
             g_hal.active_index = i;
-            return NEURONOS_OK;
+            return NEURONOS_HAL_OK;
         }
     }
-    return NEURONOS_ERR_NO_BACKEND;
+    return NEURONOS_HAL_ERR_NO_BACKEND;
 }
 
 int neuronos_hal_get_backend_count(void) {

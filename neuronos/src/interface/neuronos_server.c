@@ -46,6 +46,65 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
+/* ---- JSON escape helper ---- */
+
+/**
+ * Escape a string for safe embedding in JSON.
+ * Returns a malloc'd buffer. Caller must free.
+ */
+static char * json_escape(const char * src, size_t src_len) {
+    /* Worst case: every char becomes \uXXXX (6 chars) */
+    size_t cap = src_len * 6 + 1;
+    char * out = malloc(cap);
+    if (!out)
+        return NULL;
+
+    size_t j = 0;
+    for (size_t i = 0; i < src_len && src[i]; i++) {
+        unsigned char c = (unsigned char)src[i];
+        switch (c) {
+            case '"':
+                out[j++] = '\\';
+                out[j++] = '"';
+                break;
+            case '\\':
+                out[j++] = '\\';
+                out[j++] = '\\';
+                break;
+            case '\n':
+                out[j++] = '\\';
+                out[j++] = 'n';
+                break;
+            case '\r':
+                out[j++] = '\\';
+                out[j++] = 'r';
+                break;
+            case '\t':
+                out[j++] = '\\';
+                out[j++] = 't';
+                break;
+            case '\b':
+                out[j++] = '\\';
+                out[j++] = 'b';
+                break;
+            case '\f':
+                out[j++] = '\\';
+                out[j++] = 'f';
+                break;
+            default:
+                if (c < 0x20) {
+                    /* Control character: use \u00XX */
+                    j += (size_t)snprintf(out + j, cap - j, "\\u%04x", c);
+                } else {
+                    out[j++] = (char)c;
+                }
+                break;
+        }
+    }
+    out[j] = '\0';
+    return out;
+}
+
 /* ---- HTTP helpers ---- */
 
 #define MAX_REQUEST 65536
@@ -191,6 +250,124 @@ static int extract_last_user_content(const char * json, char * out, size_t out_l
     return json_get_string(last_content - 1, "content", out, out_len);
 }
 
+/*
+ * Parse OpenAI-format messages array into neuronos_chat_msg_t array.
+ * The messages array looks like: "messages": [{"role":"user","content":"hello"}, ...]
+ *
+ * Returns malloc'd arrays. Caller must free msgs, and each role/content string,
+ * then the msgs array itself. Returns count via *out_count.
+ * Returns NULL on failure.
+ */
+typedef struct {
+    char * role;
+    char * content;
+} parsed_msg_t;
+
+static parsed_msg_t * parse_messages_array(const char * json, int * out_count) {
+    *out_count = 0;
+
+    /* Find "messages" array */
+    const char * arr = strstr(json, "\"messages\"");
+    if (!arr)
+        return NULL;
+
+    /* Find opening bracket */
+    const char * bracket = strchr(arr + 10, '[');
+    if (!bracket)
+        return NULL;
+    bracket++;
+
+    /* Count messages (rough: count occurrences of "role" within the array) */
+    int cap = 32;
+    parsed_msg_t * msgs = calloc((size_t)cap, sizeof(parsed_msg_t));
+    if (!msgs)
+        return NULL;
+
+    int count = 0;
+    const char * p = bracket;
+
+    while (*p) {
+        /* Find next message object opening brace */
+        const char * obj_start = strchr(p, '{');
+        if (!obj_start)
+            break;
+
+        /* Check if we've gone past the closing bracket of the messages array */
+        /* Scan from p to obj_start: if we hit ']' first, we're done */
+        for (const char * scan = p; scan < obj_start; scan++) {
+            if (*scan == ']')
+                goto done;
+        }
+
+        /* Find matching closing brace for this message object */
+        int depth = 1;
+        const char * obj_end = obj_start + 1;
+        bool in_str = false;
+        while (*obj_end && depth > 0) {
+            if (*obj_end == '"' && *(obj_end - 1) != '\\')
+                in_str = !in_str;
+            if (!in_str) {
+                if (*obj_end == '{')
+                    depth++;
+                else if (*obj_end == '}')
+                    depth--;
+            }
+            if (depth > 0)
+                obj_end++;
+        }
+        if (depth != 0)
+            break;
+
+        /* We have the object from obj_start to obj_end (inclusive) */
+        size_t obj_len = (size_t)(obj_end - obj_start + 1);
+        char * obj = malloc(obj_len + 1);
+        if (!obj)
+            break;
+        memcpy(obj, obj_start, obj_len);
+        obj[obj_len] = '\0';
+
+        /* Extract role and content */
+        char role_buf[64] = {0};
+        char content_buf[8192] = {0};
+        if (json_get_string(obj, "role", role_buf, sizeof(role_buf)) == 0 &&
+            json_get_string(obj, "content", content_buf, sizeof(content_buf)) == 0) {
+            if (count >= cap) {
+                cap *= 2;
+                msgs = realloc(msgs, (size_t)cap * sizeof(parsed_msg_t));
+                if (!msgs) {
+                    free(obj);
+                    *out_count = 0;
+                    return NULL;
+                }
+            }
+            msgs[count].role = strdup(role_buf);
+            msgs[count].content = strdup(content_buf);
+            count++;
+        }
+
+        free(obj);
+        p = obj_end + 1;
+    }
+
+done:
+    *out_count = count;
+    if (count == 0) {
+        free(msgs);
+        return NULL;
+    }
+    return msgs;
+}
+
+static void free_parsed_msgs(parsed_msg_t * msgs, int count) {
+    if (!msgs)
+        return;
+    for (int i = 0; i < count; i++) {
+        free(msgs[i].role);
+        free(msgs[i].content);
+    }
+    free(msgs);
+}
+
 /* ---- Endpoint Handlers ---- */
 
 static void handle_health(socket_t sock) {
@@ -237,26 +414,44 @@ static void handle_completions(socket_t sock, const char * body) {
     neuronos_gen_result_t result = neuronos_generate(g_model, gparams);
 
     if (result.status == NEURONOS_OK && result.text) {
+        /* JSON-escape the generated text */
+        char * escaped = json_escape(result.text, strlen(result.text));
+        if (!escaped) {
+            send_json(sock, 500, "{\"error\":{\"message\":\"Memory allocation failed\"}}");
+            neuronos_gen_result_free(&result);
+            return;
+        }
+
         /* Build OpenAI-compatible response */
-        char response[MAX_RESPONSE];
-        int rlen = snprintf(response, sizeof(response),
-                            "{\"id\":\"cmpl-neuronos\","
-                            "\"object\":\"text_completion\","
-                            "\"created\":%d,"
-                            "\"model\":\"neuronos-local\","
-                            "\"choices\":[{"
-                            "\"text\":\"%.*s\","
-                            "\"index\":0,"
-                            "\"finish_reason\":\"stop\""
-                            "}],"
-                            "\"usage\":{"
-                            "\"completion_tokens\":%d,"
-                            "\"total_tokens\":%d"
-                            "}}",
-                            0, /* timestamp placeholder */
-                            (int)(sizeof(response) - 512), result.text, result.n_tokens, result.n_tokens);
-        (void)rlen;
+        size_t resp_cap = strlen(escaped) + 512;
+        char * response = malloc(resp_cap);
+        if (!response) {
+            free(escaped);
+            send_json(sock, 500, "{\"error\":{\"message\":\"Memory allocation failed\"}}");
+            neuronos_gen_result_free(&result);
+            return;
+        }
+
+        snprintf(response, resp_cap,
+                 "{\"id\":\"cmpl-neuronos\","
+                 "\"object\":\"text_completion\","
+                 "\"created\":%d,"
+                 "\"model\":\"neuronos-local\","
+                 "\"choices\":[{"
+                 "\"text\":\"%s\","
+                 "\"index\":0,"
+                 "\"finish_reason\":\"stop\""
+                 "}],"
+                 "\"usage\":{"
+                 "\"completion_tokens\":%d,"
+                 "\"total_tokens\":%d"
+                 "}}",
+                 0, /* timestamp placeholder */
+                 escaped, result.n_tokens, result.n_tokens);
+
         send_json(sock, 200, response);
+        free(response);
+        free(escaped);
     } else {
         send_json(sock, 500, "{\"error\":{\"message\":\"Generation failed\"}}");
     }
@@ -278,36 +473,9 @@ static bool sse_token_callback(const char * token_text, void * user_data) {
         return false;
 
     /* JSON-escape the token text */
-    char escaped[2048] = {0};
-    size_t j = 0;
-    for (size_t i = 0; token_text[i] && j < sizeof(escaped) - 8; i++) {
-        switch (token_text[i]) {
-            case '"':
-                escaped[j++] = '\\';
-                escaped[j++] = '"';
-                break;
-            case '\\':
-                escaped[j++] = '\\';
-                escaped[j++] = '\\';
-                break;
-            case '\n':
-                escaped[j++] = '\\';
-                escaped[j++] = 'n';
-                break;
-            case '\r':
-                escaped[j++] = '\\';
-                escaped[j++] = 'r';
-                break;
-            case '\t':
-                escaped[j++] = '\\';
-                escaped[j++] = 't';
-                break;
-            default:
-                escaped[j++] = token_text[i];
-                break;
-        }
-    }
-    escaped[j] = '\0';
+    char * escaped = json_escape(token_text, strlen(token_text));
+    if (!escaped)
+        return false;
 
     /* OpenAI streaming format: data: {"choices":[{"delta":{"content":"..."}}]} */
     char chunk[4096];
@@ -321,6 +489,7 @@ static bool sse_token_callback(const char * token_text, void * user_data) {
                        "\"finish_reason\":null"
                        "}]}\n\n",
                        escaped);
+    free(escaped);
 
     ssize_t sent = send(ctx->sock, chunk, (size_t)len, 0);
     ctx->n_tokens++;
@@ -368,11 +537,37 @@ static void handle_chat_completions(socket_t sock, const char * body) {
         return;
     }
 
-    char content[8192] = {0};
-    if (extract_last_user_content(body, content, sizeof(content)) != 0) {
-        send_json(sock, 400, "{\"error\":{\"message\":\"Missing messages content\"}}");
-        return;
+    /* Parse messages array and format with chat template */
+    int msg_count = 0;
+    parsed_msg_t * parsed = parse_messages_array(body, &msg_count);
+
+    char * formatted_prompt = NULL;
+
+    if (parsed && msg_count > 0) {
+        /* Build neuronos_chat_msg_t array from parsed messages */
+        neuronos_chat_msg_t * chat_msgs = calloc((size_t)msg_count, sizeof(neuronos_chat_msg_t));
+        if (chat_msgs) {
+            for (int i = 0; i < msg_count; i++) {
+                chat_msgs[i].role = parsed[i].role;
+                chat_msgs[i].content = parsed[i].content;
+            }
+
+            neuronos_chat_format(g_model, NULL, chat_msgs, (size_t)msg_count, true, &formatted_prompt);
+            free(chat_msgs);
+        }
     }
+
+    /* Fallback: extract last user content if template formatting failed */
+    char content_fallback[8192] = {0};
+    if (!formatted_prompt) {
+        if (extract_last_user_content(body, content_fallback, sizeof(content_fallback)) != 0) {
+            free_parsed_msgs(parsed, msg_count);
+            send_json(sock, 400, "{\"error\":{\"message\":\"Missing messages content\"}}");
+            return;
+        }
+    }
+
+    const char * effective_prompt = formatted_prompt ? formatted_prompt : content_fallback;
 
     int max_tokens = json_get_int(body, "max_tokens", 256);
     float temperature = json_get_float(body, "temperature", 0.7f);
@@ -396,7 +591,7 @@ static void handle_chat_completions(socket_t sock, const char * body) {
         sse_stream_ctx_t ctx = {.sock = sock, .n_tokens = 0};
 
         neuronos_gen_params_t gparams = {
-            .prompt = content,
+            .prompt = effective_prompt,
             .max_tokens = max_tokens,
             .temperature = temperature,
             .top_p = 0.95f,
@@ -423,9 +618,9 @@ static void handle_chat_completions(socket_t sock, const char * body) {
 
         neuronos_gen_result_free(&result);
     } else {
-        /* ── Non-streaming mode (original) ── */
+        /* ── Non-streaming mode ── */
         neuronos_gen_params_t gparams = {
-            .prompt = content,
+            .prompt = effective_prompt,
             .max_tokens = max_tokens,
             .temperature = temperature,
             .top_p = 0.95f,
@@ -439,15 +634,35 @@ static void handle_chat_completions(socket_t sock, const char * body) {
         neuronos_gen_result_t result = neuronos_generate(g_model, gparams);
 
         if (result.status == NEURONOS_OK && result.text) {
-            char response[MAX_RESPONSE];
-            snprintf(response, sizeof(response),
+            /* JSON-escape the generated text */
+            char * escaped = json_escape(result.text, strlen(result.text));
+            if (!escaped) {
+                send_json(sock, 500, "{\"error\":{\"message\":\"Memory allocation failed\"}}");
+                neuronos_gen_result_free(&result);
+                neuronos_free(formatted_prompt);
+                free_parsed_msgs(parsed, msg_count);
+                return;
+            }
+
+            size_t resp_cap = strlen(escaped) + 512;
+            char * response = malloc(resp_cap);
+            if (!response) {
+                free(escaped);
+                send_json(sock, 500, "{\"error\":{\"message\":\"Memory allocation failed\"}}");
+                neuronos_gen_result_free(&result);
+                neuronos_free(formatted_prompt);
+                free_parsed_msgs(parsed, msg_count);
+                return;
+            }
+
+            snprintf(response, resp_cap,
                      "{\"id\":\"chatcmpl-neuronos\","
                      "\"object\":\"chat.completion\","
                      "\"created\":%d,"
                      "\"model\":\"neuronos-local\","
                      "\"choices\":[{"
                      "\"index\":0,"
-                     "\"message\":{\"role\":\"assistant\",\"content\":\"%.*s\"},"
+                     "\"message\":{\"role\":\"assistant\",\"content\":\"%s\"},"
                      "\"finish_reason\":\"stop\""
                      "}],"
                      "\"usage\":{"
@@ -455,14 +670,20 @@ static void handle_chat_completions(socket_t sock, const char * body) {
                      "\"completion_tokens\":%d,"
                      "\"total_tokens\":%d"
                      "}}",
-                     0, (int)(sizeof(response) - 512), result.text, result.n_tokens, result.n_tokens);
+                     0, escaped, result.n_tokens, result.n_tokens);
+
             send_json(sock, 200, response);
+            free(response);
+            free(escaped);
         } else {
             send_json(sock, 500, "{\"error\":{\"message\":\"Generation failed\"}}");
         }
 
         neuronos_gen_result_free(&result);
     }
+
+    neuronos_free(formatted_prompt);
+    free_parsed_msgs(parsed, msg_count);
 }
 
 static void handle_root(socket_t sock) {

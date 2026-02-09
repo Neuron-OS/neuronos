@@ -21,6 +21,14 @@ set(NEURONOS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(LLAMA_SRC_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/llama.cpp)
 set(LLAMA_BUILD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../build/3rdparty/llama.cpp)
 
+# Detect if we're building standalone or as a subdirectory of the outer build.
+# When integrated, llama/ggml targets are already available from add_subdirectory().
+if(TARGET llama)
+    set(NEURONOS_STANDALONE OFF)
+else()
+    set(NEURONOS_STANDALONE ON)
+endif()
+
 # ═════════════════════════════════════════════════════════════
 # Layer 1: HAL — Hardware Abstraction Layer
 # ═════════════════════════════════════════════════════════════
@@ -31,6 +39,7 @@ set(HAL_SOURCES
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|x86")
     list(APPEND HAL_SOURCES src/hal/hal_x86_avx2.c)
+    list(APPEND HAL_SOURCES src/hal/hal_x86_avxvnni.c)
 endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
@@ -46,18 +55,20 @@ target_include_directories(neuronos_hal
 )
 
 # Link against llama.cpp libs (needed for SIMD backends that call BitNet kernels)
-target_link_directories(neuronos_hal PUBLIC
-    ${LLAMA_BUILD_DIR}/src
-    ${LLAMA_BUILD_DIR}/ggml/src
-)
+if(NEURONOS_STANDALONE)
+    target_link_directories(neuronos_hal PUBLIC
+        ${LLAMA_BUILD_DIR}/src
+        ${LLAMA_BUILD_DIR}/ggml/src
+    )
+endif()
 target_link_libraries(neuronos_hal PUBLIC llama ggml)
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(neuronos_hal PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|x86")
-        set_source_files_properties(src/hal/hal_x86_avx2.c
-            PROPERTIES COMPILE_FLAGS "-mavx2 -mssse3")
+        set_source_files_properties(${HAL_SOURCES}
+            PROPERTIES COMPILE_FLAGS "-mavx2 -mssse3 -mavxvnni")
     endif()
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
         set_source_files_properties(src/hal/hal_arm_neon.c
@@ -82,10 +93,12 @@ target_include_directories(neuronos_engine
 )
 
 # Link against llama.cpp shared libs from the parent build
-target_link_directories(neuronos_engine PUBLIC
-    ${LLAMA_BUILD_DIR}/src
-    ${LLAMA_BUILD_DIR}/ggml/src
-)
+if(NEURONOS_STANDALONE)
+    target_link_directories(neuronos_engine PUBLIC
+        ${LLAMA_BUILD_DIR}/src
+        ${LLAMA_BUILD_DIR}/ggml/src
+    )
+endif()
 target_link_libraries(neuronos_engine PUBLIC llama ggml m)
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")

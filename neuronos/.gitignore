@@ -1,0 +1,34 @@
+# Build
+build/
+cmake-build-*/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# Models (large binaries)
+models/
+
+# IDE
+.vscode/.history/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Cache
+.cache/
+.ccache/
+.venv

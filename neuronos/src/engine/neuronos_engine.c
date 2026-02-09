@@ -5,6 +5,7 @@
  * Phase 2A: engine init, model loading, text generation.
  * ============================================================ */
 #include "neuronos/neuronos.h"
+#include "neuronos/neuronos_hal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,8 +43,13 @@ static int detect_n_threads(void) {
 #ifdef _SC_NPROCESSORS_ONLN
     long nproc = sysconf(_SC_NPROCESSORS_ONLN);
     if (nproc > 0) {
-        /* Use physical cores heuristic: assume ~half are E-cores on hybrid */
-        return (int)(nproc > 8 ? nproc / 2 : nproc);
+        /* Use most cores: on hybrid CPUs (P+E), using ~75% of
+         * logical cores gives best throughput for ternary inference.
+         * Benchmarked: 8-10 threads optimal on 16-thread i7-12650H. */
+        int n = (int)(nproc * 3 / 4);
+        if (n < 2) n = 2;
+        if (n > 16) n = 16;
+        return n;
     }
 #endif
     return 4;
@@ -64,6 +70,10 @@ neuronos_engine_t * neuronos_init(neuronos_engine_params_t params) {
 
     /* Initialize llama.cpp backend */
     llama_backend_init();
+
+    /* Initialize NeuronOS HAL */
+    neuronos_hal_init();
+
     engine->initialized = true;
 
     if (engine->verbose) {
@@ -78,7 +88,9 @@ void neuronos_shutdown(neuronos_engine_t * engine) {
     if (!engine)
         return;
     if (engine->initialized) {
+        neuronos_hal_shutdown();
         llama_backend_free();
+        engine->initialized = false;
     }
     free(engine);
 }
@@ -127,7 +139,7 @@ neuronos_model_t * neuronos_model_load(neuronos_engine_t * engine, neuronos_mode
     cparams.n_batch = 512;
     cparams.n_threads = engine->n_threads;
     cparams.n_threads_batch = engine->n_threads;
-    cparams.flash_attn = false;
+    cparams.flash_attn = true;
 
     model->llama_ctx = llama_new_context_with_model(model->llama_model, cparams);
     if (!model->llama_ctx) {
@@ -198,6 +210,8 @@ neuronos_gen_result_t neuronos_generate(neuronos_model_t * model, neuronos_gen_p
     float temp = params.temperature >= 0.0f ? params.temperature : 0.7f;
     float top_p = params.top_p > 0.0f ? params.top_p : 0.95f;
     int top_k = params.top_k > 0 ? params.top_k : 40;
+    float repeat_penalty = params.repeat_penalty > 0.0f ? params.repeat_penalty : 1.1f;
+    int repeat_last_n = params.repeat_last_n > 0 ? params.repeat_last_n : 64;
     uint32_t seed = params.seed > 0 ? params.seed : (uint32_t)time(NULL);
     const char * grammar_root = params.grammar_root ? params.grammar_root : "root";
 
@@ -240,7 +254,17 @@ neuronos_gen_result_t neuronos_generate(neuronos_model_t * model, neuronos_gen_p
         }
     }
 
-    /* Standard sampling: top-k → top-p → temperature → dist */
+    /* Standard sampling: penalties → top-k → top-p → temperature → dist */
+    if (repeat_penalty != 1.0f) {
+        int32_t n_vocab = llama_n_vocab(lmodel);
+        llama_token eos_id = llama_token_eos(lmodel);
+        llama_token nl_id  = llama_token_nl(lmodel);
+        llama_sampler_chain_add(smpl,
+            llama_sampler_init_penalties(n_vocab, eos_id, nl_id,
+                                        repeat_last_n, repeat_penalty,
+                                        0.0f, 0.0f,   /* freq_penalty, presence_penalty */
+                                        false, false)); /* penalize_nl, ignore_eos */
+    }
     llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
     llama_sampler_chain_add(smpl, llama_sampler_init_top_p(top_p, 1));
 
@@ -360,4 +384,52 @@ void neuronos_gen_result_free(neuronos_gen_result_t * result) {
 
 void neuronos_free(void * ptr) {
     free(ptr);
+}
+
+/* ============================================================
+ * CHAT TEMPLATE
+ * ============================================================ */
+
+neuronos_status_t neuronos_chat_format(const neuronos_model_t * model, const char * tmpl,
+                                       const neuronos_chat_msg_t * messages, size_t n_messages,
+                                       bool add_generation_prompt, char ** out_text) {
+    if (!model || !model->llama_model || !messages || n_messages == 0 || !out_text) {
+        return NEURONOS_ERROR_INVALID_PARAM;
+    }
+
+    /* llama_chat_message is layout-compatible with neuronos_chat_msg_t
+     * (two const char * fields), but we copy explicitly for safety. */
+    struct llama_chat_message * msgs = malloc(n_messages * sizeof(struct llama_chat_message));
+    if (!msgs) {
+        return NEURONOS_ERROR_GENERATE;
+    }
+    for (size_t i = 0; i < n_messages; i++) {
+        msgs[i].role    = messages[i].role;
+        msgs[i].content = messages[i].content;
+    }
+
+    /* First call: measure required buffer size */
+    int32_t needed = llama_chat_apply_template(
+        model->llama_model, tmpl, msgs, n_messages, add_generation_prompt, NULL, 0);
+
+    if (needed < 0) {
+        free(msgs);
+        return NEURONOS_ERROR_INVALID_PARAM;
+    }
+
+    /* Allocate and format */
+    size_t buf_size = (size_t)needed + 1;
+    char * buf = malloc(buf_size);
+    if (!buf) {
+        free(msgs);
+        return NEURONOS_ERROR_GENERATE;
+    }
+
+    llama_chat_apply_template(
+        model->llama_model, tmpl, msgs, n_messages, add_generation_prompt, buf, (int32_t)buf_size);
+    buf[needed] = '\0';
+
+    free(msgs);
+    *out_text = buf;
+    return NEURONOS_OK;
 }

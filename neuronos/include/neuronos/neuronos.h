@@ -105,6 +105,8 @@ typedef struct {
     float temperature;          /* 0.0 = greedy (default: 0.7)  */
     float top_p;                /* nucleus sampling (0.95)      */
     int top_k;                  /* top-k sampling (40)          */
+    float repeat_penalty;       /* repetition penalty (1.1); 1.0 = off */
+    int repeat_last_n;          /* window for repeat penalty (64)      */
     const char * grammar;       /* GBNF grammar or NULL         */
     const char * grammar_root;  /* grammar root rule ("root")   */
     neuronos_token_cb on_token; /* stream callback or NULL      */
@@ -125,6 +127,36 @@ neuronos_gen_result_t neuronos_generate(neuronos_model_t * model, neuronos_gen_p
 
 /* Free a generation result */
 void neuronos_gen_result_free(neuronos_gen_result_t * result);
+
+/* ============================================================
+ * CHAT TEMPLATE: Format messages using model's chat template
+ *
+ * Wraps llama_chat_apply_template() to produce correctly
+ * formatted prompts (e.g. Llama-3 <|start_header_id|> format).
+ *
+ * The template is auto-detected from the model's GGUF metadata.
+ * Pass a custom tmpl string to override (e.g. "chatml", "llama3").
+ * ============================================================ */
+
+typedef struct {
+    const char * role;    /* "system", "user", or "assistant"     */
+    const char * content; /* message text                          */
+} neuronos_chat_msg_t;
+
+/* Format an array of chat messages into a prompt string.
+ *
+ * @param model                  Loaded model (reads chat template from GGUF)
+ * @param tmpl                   Custom template name or NULL for auto-detect
+ * @param messages               Array of chat messages
+ * @param n_messages             Number of messages
+ * @param add_generation_prompt  Append assistant turn prefix at the end
+ * @param out_text               Output: caller must free with neuronos_free()
+ *
+ * @return NEURONOS_OK on success.
+ */
+neuronos_status_t neuronos_chat_format(const neuronos_model_t * model, const char * tmpl,
+                                       const neuronos_chat_msg_t * messages, size_t n_messages,
+                                       bool add_generation_prompt, char ** out_text);
 
 /* ============================================================
  * TOOL SYSTEM: Register and execute tools
@@ -293,14 +325,31 @@ void neuronos_hw_print_info(const neuronos_hw_info_t * hw);
  * MODEL SCANNER & AUTO-SELECTION
  * ============================================================ */
 
+/* Quantization type detected from filename heuristics */
+typedef enum {
+    NEURONOS_QUANT_UNKNOWN = 0,
+    NEURONOS_QUANT_I2_S,       /* BitNet ternary 1.58-bit           */
+    NEURONOS_QUANT_TL1,        /* BitNet TL1 LUT kernel             */
+    NEURONOS_QUANT_Q2_K,       /* 2-bit k-quant                     */
+    NEURONOS_QUANT_Q3_K,       /* 3-bit k-quant                     */
+    NEURONOS_QUANT_Q4_0,       /* 4-bit legacy                      */
+    NEURONOS_QUANT_Q4_K_M,     /* 4-bit k-quant medium              */
+    NEURONOS_QUANT_Q5_K_M,     /* 5-bit k-quant medium              */
+    NEURONOS_QUANT_Q6_K,       /* 6-bit k-quant                     */
+    NEURONOS_QUANT_Q8_0,       /* 8-bit                             */
+    NEURONOS_QUANT_F16,        /* float16                           */
+} neuronos_quant_type_t;
+
 typedef struct {
-    char path[512];       /* Absolute path to .gguf file        */
-    char name[128];       /* Model name (from filename)         */
-    int64_t file_size_mb; /* File size in MB                    */
-    int64_t est_ram_mb;   /* Estimated RAM needed (file + ctx)  */
-    int64_t n_params_est; /* Estimated params (from file size)  */
-    float score;          /* Auto-computed suitability score     */
-    bool fits_in_ram;     /* Can load with available RAM?       */
+    char path[512];              /* Absolute path to .gguf file        */
+    char name[128];              /* Model name (from filename)         */
+    int64_t file_size_mb;        /* File size in MB                    */
+    int64_t est_ram_mb;          /* Estimated RAM needed (file + ctx)  */
+    int64_t n_params_est;        /* Estimated params (from file size)  */
+    float score;                 /* Auto-computed suitability score     */
+    bool fits_in_ram;            /* Can load with available RAM?       */
+    neuronos_quant_type_t quant; /* Detected quantization type         */
+    bool is_ternary;             /* True if I2_S / TL1 / 1.58-bit     */
 } neuronos_model_entry_t;
 
 /* Scan a directory recursively for .gguf model files.

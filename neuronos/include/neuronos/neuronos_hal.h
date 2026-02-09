@@ -85,12 +85,12 @@ neuronos_device_tier_t neuronos_detect_device_tier(void);
 /* ──────────────────────────── Error codes ──────────────────────── */
 
 typedef enum {
-    NEURONOS_OK = 0,
-    NEURONOS_ERR_INIT = -1,        /* Backend init failed */
-    NEURONOS_ERR_NO_BACKEND = -2,  /* No suitable backend found */
-    NEURONOS_ERR_INVALID = -3,     /* Invalid parameter */
-    NEURONOS_ERR_UNSUPPORTED = -4, /* Operation not supported by backend */
-} neuronos_status_t;
+    NEURONOS_HAL_OK = 0,
+    NEURONOS_HAL_ERR_INIT = -1,        /* Backend init failed */
+    NEURONOS_HAL_ERR_NO_BACKEND = -2,  /* No suitable backend found */
+    NEURONOS_HAL_ERR_INVALID = -3,     /* Invalid parameter */
+    NEURONOS_HAL_ERR_UNSUPPORTED = -4, /* Operation not supported by backend */
+} neuronos_hal_status_t;
 
 /* ──────────────────────────── Hardware features ─────────────────── */
 
@@ -130,7 +130,8 @@ typedef enum {
 typedef enum {
     NEURONOS_BACKEND_SCALAR = 0,    /* Portable C fallback */
     NEURONOS_BACKEND_X86_AVX2 = 10, /* x86-64 with AVX2 */
-    NEURONOS_BACKEND_X86_AVX512 = 11,
+    NEURONOS_BACKEND_X86_AVXVNNI = 11, /* x86-64 with AVX-VNNI (Alder Lake+) */
+    NEURONOS_BACKEND_X86_AVX512 = 12,
     NEURONOS_BACKEND_ARM_NEON = 20, /* ARM with NEON */
     NEURONOS_BACKEND_ARM_SVE = 21,
     NEURONOS_BACKEND_WASM = 30,   /* WebAssembly SIMD */
@@ -219,7 +220,7 @@ typedef struct neuronos_backend {
     neuronos_gemm_i2_i8_fn gemm_i2_i8; /* Optional: can be NULL */
 
     /* Lifecycle */
-    neuronos_status_t (*init)(void); /* Called once at registration */
+    neuronos_hal_status_t (*init)(void); /* Called once at registration */
     void (*shutdown)(void);          /* Called at neuronos_hal_shutdown() */
 } neuronos_backend_t;
 
@@ -231,9 +232,9 @@ typedef struct neuronos_backend {
  * Initialize the HAL: probe hardware, register built-in backends,
  * select the best one. Must be called before any kernel operations.
  *
- * @return NEURONOS_OK on success
+ * @return NEURONOS_HAL_OK on success
  */
-neuronos_status_t neuronos_hal_init(void);
+neuronos_hal_status_t neuronos_hal_init(void);
 
 /**
  * Shutdown the HAL and all registered backends.
@@ -250,9 +251,9 @@ uint32_t neuronos_hal_get_features(void);
  * Can be called before or after neuronos_hal_init().
  *
  * @param backend  Pointer to backend descriptor (copied internally)
- * @return NEURONOS_OK on success
+ * @return NEURONOS_HAL_OK on success
  */
-neuronos_status_t neuronos_hal_register_backend(const neuronos_backend_t * backend);
+neuronos_hal_status_t neuronos_hal_register_backend(const neuronos_backend_t * backend);
 
 /**
  * Get the currently active backend.
@@ -267,9 +268,9 @@ const neuronos_backend_t * neuronos_hal_get_active_backend(void);
  * or its required features aren't available.
  *
  * @param type  Backend type to activate
- * @return NEURONOS_OK on success
+ * @return NEURONOS_HAL_OK on success
  */
-neuronos_status_t neuronos_hal_select_backend(neuronos_backend_type_t type);
+neuronos_hal_status_t neuronos_hal_select_backend(neuronos_backend_type_t type);
 
 /**
  * Get the number of registered backends.

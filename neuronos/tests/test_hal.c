@@ -28,8 +28,8 @@
 
 /* ──────── Test 1: Init and hardware detection ──────── */
 static int test_init(void) {
-    neuronos_status_t st = neuronos_hal_init();
-    ASSERT(st == NEURONOS_OK, "neuronos_hal_init() should return OK");
+    neuronos_hal_status_t st = neuronos_hal_init();
+    ASSERT(st == NEURONOS_HAL_OK, "neuronos_hal_init() should return OK");
 
     uint32_t features = neuronos_hal_get_features();
     printf("  Detected features: 0x%08x\n", features);
@@ -59,8 +59,8 @@ static int test_backends(void) {
     }
 
     /* Test selecting scalar explicitly */
-    neuronos_status_t st = neuronos_hal_select_backend(NEURONOS_BACKEND_SCALAR);
-    ASSERT(st == NEURONOS_OK, "Should be able to select scalar backend");
+    neuronos_hal_status_t st = neuronos_hal_select_backend(NEURONOS_BACKEND_SCALAR);
+    ASSERT(st == NEURONOS_HAL_OK, "Should be able to select scalar backend");
 
     const neuronos_backend_t * active = neuronos_hal_get_active_backend();
     ASSERT(active->type == NEURONOS_BACKEND_SCALAR, "Active should be scalar");
@@ -68,7 +68,7 @@ static int test_backends(void) {
     /* Re-init to get best backend again */
     neuronos_hal_shutdown();
     st = neuronos_hal_init();
-    ASSERT(st == NEURONOS_OK, "Re-init should succeed");
+    ASSERT(st == NEURONOS_HAL_OK, "Re-init should succeed");
 
     PASS("Backend enumeration + selection");
     return 0;

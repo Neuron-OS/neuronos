@@ -44,4 +44,7 @@ __pycache__/
 poetry.toml
 
 build/
-logs/
+logs/cuda_*.run
+*.run
+cuda_*.run
+*.run

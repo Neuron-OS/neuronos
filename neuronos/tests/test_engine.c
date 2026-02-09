@@ -14,8 +14,9 @@
  * 10. Zero-arg auto-launch
  * 11. GPU detection
  * 12. Expanded agentic tools
- * 13. MCP server protocol
- * 14. Ternary GPU offload guard
+ *  13. MCP server protocol
+ * 14. Chat template formatting
+ * 15. Ternary GPU offload guard
  *
  * Usage: ./test_engine <path-to-gguf-model>
  * ============================================================ */
@@ -549,7 +550,54 @@ static void test_mcp_protocol(void) {
     TEST_PASS();
 }
 
-/* ---- Test 14: Ternary GPU offload guard ---- */
+/* ---- Test 14: Chat template formatting ---- */
+static void test_chat_format(void) {
+    TEST_START("Chat template formatting");
+
+    if (!g_model) {
+        fprintf(stderr, "SKIP (model not loaded)");
+        tests_run--;
+        return;
+    }
+
+    /* Basic two-message conversation */
+    neuronos_chat_msg_t msgs[] = {
+        {"system", "You are a helpful assistant."},
+        {"user",   "Hello"},
+    };
+
+    char * formatted = NULL;
+    neuronos_status_t st = neuronos_chat_format(g_model, NULL, msgs, 2, true, &formatted);
+    ASSERT(st == NEURONOS_OK, "chat_format failed");
+    ASSERT(formatted != NULL, "formatted is NULL");
+    ASSERT(strlen(formatted) > 0, "formatted is empty");
+    ASSERT(strstr(formatted, "Hello") != NULL, "should contain user message");
+
+    fprintf(stderr, "\n  Formatted (%zu bytes): %.120s%s", strlen(formatted), formatted,
+            strlen(formatted) > 120 ? "..." : "");
+
+    neuronos_free(formatted);
+
+    /* Test with explicit template override */
+    char * formatted2 = NULL;
+    st = neuronos_chat_format(g_model, "llama3", msgs, 2, true, &formatted2);
+    ASSERT(st == NEURONOS_OK, "chat_format with llama3 template failed");
+    ASSERT(formatted2 != NULL, "formatted2 is NULL");
+    ASSERT(strstr(formatted2, "Hello") != NULL, "should contain user message");
+    neuronos_free(formatted2);
+
+    /* Test invalid params */
+    char * bad = NULL;
+    st = neuronos_chat_format(NULL, NULL, msgs, 2, true, &bad);
+    ASSERT(st == NEURONOS_ERROR_INVALID_PARAM, "NULL model should fail");
+
+    st = neuronos_chat_format(g_model, NULL, NULL, 0, true, &bad);
+    ASSERT(st == NEURONOS_ERROR_INVALID_PARAM, "NULL messages should fail");
+
+    TEST_PASS();
+}
+
+/* ---- Test 15: Ternary GPU offload guard ---- */
 static void test_ternary_gpu_guard(void) {
     TEST_START("Ternary GPU offload guard");
 
@@ -562,6 +610,8 @@ static void test_ternary_gpu_guard(void) {
     strncpy(ternary_model.name, "ggml-model-i2_s.gguf", sizeof(ternary_model.name) - 1);
     ternary_model.file_size_mb = 1200;
     ternary_model.est_ram_mb = 1500;
+    ternary_model.quant = NEURONOS_QUANT_I2_S;
+    ternary_model.is_ternary = true;
 
     neuronos_tuned_params_t t = neuronos_auto_tune(&hw, &ternary_model);
     fprintf(stderr, "\n  Ternary model '%s': ngl=%d", ternary_model.name, t.n_gpu_layers);
@@ -617,6 +667,7 @@ int main(int argc, char * argv[]) {
     test_gpu_detection();
     test_agentic_tools();
     test_mcp_protocol();
+    test_chat_format();
     test_ternary_gpu_guard();
 
     /* Cleanup model if loaded */

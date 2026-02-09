@@ -156,16 +156,80 @@ static char * json_extract_object(const char * json, const char * key) {
 }
 
 /*
- * Build the conversation prompt for the current step.
- * Format:
- *   <system prompt>
- *   User: <user_input>
- *   [Observation from tool_name: <result>]  (for each prior step)
- *   Assistant:
+ * Build the conversation prompt for the current step using chat template.
+ *
+ * Messages:
+ *   [0] system  = agent system prompt (with tool descriptions)
+ *   [1] user    = user input
+ *   [2] assistant = step 0 output (JSON)
+ *   [3] user    = "Observation from <tool>: <result>"
+ *   [4] assistant = step 1 output ...
+ *   ... (repeats for each step)
+ *
+ * Falls back to plain text formatting if chat template is unavailable.
  */
 static char * build_prompt(const neuronos_agent_t * agent, const char * user_input, const char ** step_outputs,
                            const char ** step_actions, const char ** step_observations, int n_steps) {
-    /* Estimate total length */
+    /* Count messages: system + user + 2 per completed step (assistant + observation) */
+    size_t n_msgs = 2; /* system + user */
+    for (int i = 0; i < n_steps; i++) {
+        if (step_outputs[i])
+            n_msgs++;
+        if (step_observations[i])
+            n_msgs++;
+    }
+
+    neuronos_chat_msg_t * msgs = calloc(n_msgs, sizeof(neuronos_chat_msg_t));
+    char ** obs_bufs = calloc((size_t)n_steps, sizeof(char *)); /* owned observation strings */
+    if (!msgs || !obs_bufs) {
+        free(msgs);
+        free(obs_bufs);
+        return NULL;
+    }
+
+    size_t idx = 0;
+    msgs[idx].role = "system";
+    msgs[idx].content = agent->system_prompt;
+    idx++;
+
+    msgs[idx].role = "user";
+    msgs[idx].content = user_input;
+    idx++;
+
+    for (int i = 0; i < n_steps; i++) {
+        if (step_outputs[i]) {
+            msgs[idx].role = "assistant";
+            msgs[idx].content = step_outputs[i];
+            idx++;
+        }
+        if (step_observations[i]) {
+            /* Build observation string: "Observation from <tool>: <result>" */
+            const char * tool = step_actions[i] ? step_actions[i] : "tool";
+            size_t obs_len = strlen("Observation from : ") + strlen(tool) + strlen(step_observations[i]) + 1;
+            obs_bufs[i] = malloc(obs_len);
+            snprintf(obs_bufs[i], obs_len, "Observation from %s: %s", tool, step_observations[i]);
+            msgs[idx].role = "user";
+            msgs[idx].content = obs_bufs[i];
+            idx++;
+        }
+    }
+
+    /* Try chat template formatting */
+    char * formatted = NULL;
+    neuronos_status_t st = neuronos_chat_format(agent->model, NULL, msgs, idx, true, &formatted);
+
+    /* Free temporary observation buffers */
+    for (int i = 0; i < n_steps; i++) {
+        free(obs_bufs[i]);
+    }
+    free(obs_bufs);
+    free(msgs);
+
+    if (st == NEURONOS_OK && formatted) {
+        return formatted; /* Caller must use neuronos_free() */
+    }
+
+    /* Fallback: plain text (legacy format) */
     size_t total = strlen(agent->system_prompt) + strlen(user_input) + 256;
     for (int i = 0; i < n_steps; i++) {
         if (step_outputs[i])
@@ -182,7 +246,6 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
     len += (size_t)sprintf(prompt + len, "%s\n", agent->system_prompt);
     len += (size_t)sprintf(prompt + len, "User: %s\n\n", user_input);
 
-    /* Append history of steps */
     for (int i = 0; i < n_steps; i++) {
         if (step_outputs[i]) {
             len += (size_t)sprintf(prompt + len, "Assistant: %s\n", step_outputs[i]);

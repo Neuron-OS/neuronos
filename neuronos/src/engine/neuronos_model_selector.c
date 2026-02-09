@@ -424,10 +424,62 @@ static int64_t estimate_ram_needed(int64_t file_size_mb_val) {
     return file_size_mb_val + (file_size_mb_val * 30 / 100) + 100; /* +100MB for context */
 }
 
-/* Estimate parameters from file size (heuristic for I2_S ternary models) */
+/* Detect quantization type from filename */
+static neuronos_quant_type_t detect_quant_type(const char * name) {
+    if (strstr(name, "i2_s") || strstr(name, "I2_S"))
+        return NEURONOS_QUANT_I2_S;
+    if (strstr(name, "tl1") || strstr(name, "TL1"))
+        return NEURONOS_QUANT_TL1;
+    /* Check k-quants (case insensitive matching via common patterns) */
+    if (strstr(name, "Q8_0") || strstr(name, "q8_0"))
+        return NEURONOS_QUANT_Q8_0;
+    if (strstr(name, "Q6_K") || strstr(name, "q6_k"))
+        return NEURONOS_QUANT_Q6_K;
+    if (strstr(name, "Q5_K_M") || strstr(name, "q5_k_m") || strstr(name, "Q5_K") || strstr(name, "q5_k"))
+        return NEURONOS_QUANT_Q5_K_M;
+    if (strstr(name, "Q4_K_M") || strstr(name, "q4_k_m") || strstr(name, "Q4_K") || strstr(name, "q4_k"))
+        return NEURONOS_QUANT_Q4_K_M;
+    if (strstr(name, "Q4_0") || strstr(name, "q4_0"))
+        return NEURONOS_QUANT_Q4_0;
+    if (strstr(name, "Q3_K") || strstr(name, "q3_k"))
+        return NEURONOS_QUANT_Q3_K;
+    if (strstr(name, "Q2_K") || strstr(name, "q2_k"))
+        return NEURONOS_QUANT_Q2_K;
+    if (strstr(name, "f16") || strstr(name, "F16") || strstr(name, "fp16"))
+        return NEURONOS_QUANT_F16;
+    /* Ternary by name convention */
+    if (strstr(name, "1.58") || strstr(name, "bitnet") || strstr(name, "BitNet") || strstr(name, "ternary"))
+        return NEURONOS_QUANT_I2_S;
+    return NEURONOS_QUANT_UNKNOWN;
+}
+
+/* Bytes per parameter for each quantization type (approximate) */
+static float bytes_per_param(neuronos_quant_type_t qt) {
+    switch (qt) {
+        case NEURONOS_QUANT_I2_S:   return 0.35f;  /* ~2 bpw + overhead */
+        case NEURONOS_QUANT_TL1:    return 0.35f;
+        case NEURONOS_QUANT_Q2_K:   return 0.40f;  /* ~2.6 bpw */
+        case NEURONOS_QUANT_Q3_K:   return 0.50f;  /* ~3.4 bpw */
+        case NEURONOS_QUANT_Q4_0:   return 0.56f;  /* ~4.5 bpw */
+        case NEURONOS_QUANT_Q4_K_M: return 0.62f;  /* ~4.9 bpw */
+        case NEURONOS_QUANT_Q5_K_M: return 0.72f;  /* ~5.7 bpw */
+        case NEURONOS_QUANT_Q6_K:   return 0.82f;  /* ~6.6 bpw */
+        case NEURONOS_QUANT_Q8_0:   return 1.10f;  /* ~8.5 bpw */
+        case NEURONOS_QUANT_F16:    return 2.00f;  /* 16 bpw */
+        default:                    return 0.62f;  /* safe Q4 estimate */
+    }
+}
+
+/* Estimate parameters from file size using detected quant type */
+static int64_t estimate_params_from_quant(int64_t file_size_mb_val, neuronos_quant_type_t qt) {
+    float bpp = bytes_per_param(qt);
+    /* file_size_bytes / bytes_per_param = total params */
+    return (int64_t)((double)(file_size_mb_val) * 1024.0 * 1024.0 / (double)bpp);
+}
+
+/* Legacy wrapper */
 static int64_t estimate_params(int64_t file_size_mb_val) {
-    /* I2_S: ~2 bits per weight = ~0.25 bytes per param (with metadata overhead ~0.35) */
-    return (int64_t)(file_size_mb_val * 1024LL * 1024LL / 35 * 100);
+    return estimate_params_from_quant(file_size_mb_val, NEURONOS_QUANT_I2_S);
 }
 
 /* Score a model based on hardware fit */
@@ -461,10 +513,22 @@ static float score_model(const neuronos_model_entry_t * entry, const neuronos_hw
     float headroom = (float)(hw->model_budget_mb - entry->est_ram_mb) / (float)hw->model_budget_mb;
     score += headroom * 50.0f;
 
-    /* Format bonus: I2_S ternary models get bonus */
-    if (strstr(entry->name, "i2_s") || strstr(entry->name, "I2_S") || strstr(entry->name, "1.58") ||
-        strstr(entry->name, "bitnet") || strstr(entry->name, "BitNet")) {
-        score += 25.0f;
+    /* Format bonus: ternary models get speed bonus, higher quants get quality bonus */
+    if (entry->is_ternary) {
+        score += 25.0f;  /* Ternary: 2-3x faster on CPU */
+    } else {
+        /* Higher quality quantization bonus (Q8 > Q6 > Q5 > Q4 > Q3 > Q2) */
+        switch (entry->quant) {
+            case NEURONOS_QUANT_Q8_0:   score += 20.0f; break;
+            case NEURONOS_QUANT_Q6_K:   score += 18.0f; break;
+            case NEURONOS_QUANT_Q5_K_M: score += 16.0f; break;
+            case NEURONOS_QUANT_Q4_K_M: score += 14.0f; break;
+            case NEURONOS_QUANT_Q4_0:   score += 12.0f; break;
+            case NEURONOS_QUANT_Q3_K:   score += 8.0f;  break;
+            case NEURONOS_QUANT_Q2_K:   score += 5.0f;  break;
+            case NEURONOS_QUANT_F16:    score += 22.0f; break;
+            default:                    score += 10.0f; break;
+        }
     }
 
     /* Instruct model bonus (better for agents) */
@@ -508,7 +572,9 @@ static int scan_dir_recursive(const char * dir_path, const neuronos_hw_info_t * 
                 extract_model_name(full_path, e->name, sizeof(e->name));
                 e->file_size_mb = file_size_mb(full_path);
                 e->est_ram_mb = estimate_ram_needed(e->file_size_mb);
-                e->n_params_est = estimate_params(e->file_size_mb);
+                e->quant = detect_quant_type(e->name);
+                e->is_ternary = (e->quant == NEURONOS_QUANT_I2_S || e->quant == NEURONOS_QUANT_TL1);
+                e->n_params_est = estimate_params_from_quant(e->file_size_mb, e->quant);
                 e->fits_in_ram = (e->est_ram_mb <= hw->model_budget_mb);
                 e->score = score_model(e, hw);
 
@@ -662,9 +728,7 @@ neuronos_tuned_params_t neuronos_auto_tune(const neuronos_hw_info_t * hw, const 
      * would bypass the ternary GEMM and fall back to slow dequant path.
      * Only offload non-ternary (standard GGUF Q4/Q8/F16) models. */
     t.n_gpu_layers = 0;
-    bool is_ternary =
-        (strstr(model->name, "i2_s") || strstr(model->name, "I2_S") || strstr(model->name, "1.58") ||
-         strstr(model->name, "bitnet") || strstr(model->name, "BitNet") || strstr(model->name, "ternary"));
+    bool is_ternary = model->is_ternary;
     if (hw->gpu_vram_mb > 0 && !is_ternary) {
         /* Estimate: each layer ≈ model_size / n_layers
          * Try to offload all if VRAM fits */

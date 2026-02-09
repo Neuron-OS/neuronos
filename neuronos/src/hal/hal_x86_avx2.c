@@ -12,7 +12,8 @@
  * Compile with: -mavx2 -mssse3 (clang/gcc)
  */
 
-#if defined(__AVX2__)
+/* Savage Mode: Force Enable */
+//#if defined(__AVX2__)
 
     #include "neuronos/neuronos_hal.h"
 
@@ -119,4 +120,4 @@ const neuronos_backend_t neuronos_backend_x86_avx2 = {
     .shutdown = NULL,
 };
 
-#endif /* __AVX2__ */
+//#endif /* __AVX2__ */

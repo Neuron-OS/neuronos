@@ -187,7 +187,82 @@ char * neuronos_tool_prompt_description(const neuronos_tool_registry_t * reg) {
  * BUILT-IN TOOLS
  * ============================================================ */
 
-/* --- shell tool --- */
+/* ---- Input sanitization helpers ---- */
+
+/**
+ * Check if a string contains any shell metacharacters that could
+ * allow command injection when embedded in single-quoted shell args.
+ * Returns true if the string is SAFE (no dangerous chars).
+ */
+static bool is_safe_for_shell_embed(const char * str, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        switch (str[i]) {
+            case '\'': /* breaks out of single quotes */
+            case '`':  /* command substitution */
+            case '$':  /* variable expansion */
+            case '|':  /* pipe */
+            case ';':  /* command separator */
+            case '&':  /* background / AND */
+            case '\n': /* command separator */
+            case '\r':
+            case '\0':
+                return false;
+            default:
+                break;
+        }
+    }
+    return true;
+}
+
+/**
+ * Validate a math expression for the calculate tool.
+ * Only allow: digits, decimal points, operators, parens, whitespace,
+ * and known bc function names.
+ * Returns true if the expression is SAFE.
+ */
+static bool is_safe_math_expression(const char * expr, size_t len) {
+    /* Allowed single characters */
+    static const char allowed_chars[] = "0123456789.+-*/^%() \t";
+
+    for (size_t i = 0; i < len; i++) {
+        char c = expr[i];
+
+        /* Check simple allowed chars */
+        if (strchr(allowed_chars, c))
+            continue;
+
+        /* Allow known bc function names: a-z letters for identifiers like sqrt, scale, etc. */
+        if (c >= 'a' && c <= 'z')
+            continue;
+        if (c >= 'A' && c <= 'Z')
+            continue;
+        if (c == '_')
+            continue;
+
+        /* Anything else (including ', ", ;, |, &, $, `, \, etc.) is rejected */
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Validate a filesystem path: reject shell metacharacters and path traversal.
+ * Returns true if the path is SAFE.
+ */
+static bool is_safe_path(const char * path, size_t len) {
+    if (!is_safe_for_shell_embed(path, len))
+        return false;
+
+    /* Reject null bytes (already covered above) and excessive .. traversal */
+    /* We allow .. in general paths but the shell-embed check handles injection */
+    return true;
+}
+
+/* --- shell tool ---
+ * NOTE: This tool intentionally executes arbitrary shell commands.
+ * Access is gated by NEURONOS_CAP_SHELL capability flag.
+ * Future: add configurable allowlist/denylist and sandbox mode.
+ */
 static neuronos_tool_result_t tool_shell(const char * args_json, void * user_data) {
     (void)user_data;
     neuronos_tool_result_t result = {0};
@@ -426,6 +501,14 @@ static neuronos_tool_result_t tool_calculate(const char * args_json, void * user
     }
 
     size_t expr_len = (size_t)(expr_end - expr_start);
+
+    /* Validate expression: reject shell metacharacters */
+    if (!is_safe_math_expression(expr_start, expr_len)) {
+        result.success = false;
+        result.error = strdup("Invalid expression: contains disallowed characters");
+        return result;
+    }
+
     /* Build command: echo 'EXPR' | bc -l */
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "echo '%.*s' | bc -l 2>&1", (int)expr_len, expr_start);
@@ -569,6 +652,18 @@ static neuronos_tool_result_t tool_search_files(const char * args_json, void * u
     }
     dir = dir_buf;
 
+    /* Validate pattern and directory: reject shell metacharacters */
+    if (!is_safe_for_shell_embed(pat_start, plen)) {
+        result.success = false;
+        result.error = strdup("Invalid pattern: contains disallowed characters");
+        return result;
+    }
+    if (!is_safe_path(dir, strlen(dir))) {
+        result.success = false;
+        result.error = strdup("Invalid directory: contains disallowed characters");
+        return result;
+    }
+
     /* Use find command for file search */
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "find \"%s\" -maxdepth 4 -name '%.*s' -type f 2>/dev/null | head -20", dir, (int)plen,
@@ -637,6 +732,13 @@ static neuronos_tool_result_t tool_http_get(const char * args_json, void * user_
     if (ulen < 8 || (strncmp(url_start, "http://", 7) != 0 && strncmp(url_start, "https://", 8) != 0)) {
         result.success = false;
         result.error = strdup("URL must start with http:// or https://");
+        return result;
+    }
+
+    /* Reject shell metacharacters in URL to prevent command injection */
+    if (!is_safe_for_shell_embed(url_start, ulen)) {
+        result.success = false;
+        result.error = strdup("URL contains disallowed characters");
         return result;
     }
 

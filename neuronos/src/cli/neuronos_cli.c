@@ -16,6 +16,7 @@
  *   neuronos <model.gguf> agent     Legacy mode
  * ============================================================ */
 #include "neuronos/neuronos.h"
+#include "neuronos/neuronos_hal.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -123,10 +124,28 @@ static int cmd_generate(neuronos_model_t * model, const char * prompt, int max_t
         return 1;
     }
 
+    /* Wrap prompt in chat template for better response quality */
+    neuronos_chat_msg_t msgs[2] = {
+        { .role = "system",
+          .content = "You are NeuronOS, a fast and helpful AI assistant running locally. "
+                     "Be concise, accurate, and direct." },
+        { .role = "user", .content = prompt },
+    };
+
+    char * formatted = NULL;
+    neuronos_status_t fst = neuronos_chat_format(model, NULL, msgs, 2, true, &formatted);
+
+    /* Use formatted prompt if available, otherwise fall back to raw prompt */
+    const char * effective_prompt = (fst == NEURONOS_OK && formatted) ? formatted : prompt;
+
+    if (verbose && formatted) {
+        fprintf(stderr, "[chat template applied, %zu bytes]\n", strlen(formatted));
+    }
+
     char * grammar = load_grammar_file(grammar_file);
 
     neuronos_gen_params_t gparams = {
-        .prompt = prompt,
+        .prompt = effective_prompt,
         .max_tokens = max_tokens,
         .temperature = temperature,
         .top_p = 0.95f,
@@ -145,6 +164,7 @@ static int cmd_generate(neuronos_model_t * model, const char * prompt, int max_t
     }
 
     int rc = (result.status == NEURONOS_OK) ? 0 : 1;
+    neuronos_free(formatted);
     free(grammar);
     neuronos_gen_result_free(&result);
     return rc;
@@ -210,23 +230,84 @@ static void print_repl_help(void) {
                     "  /mode <gen|agent>  Switch default mode\n"
                     "  /temp <float>  Set temperature\n"
                     "  /tokens <n>    Set max tokens\n"
+                    "  /clear         Clear conversation history\n"
+                    "  /system <text> Set system prompt\n"
                     "  /quit          Exit NeuronOS\n"
                     "\n"
-                    "  Any other input → text generation\n"
+                    "  Any other input → chat generation\n"
                     "\033[0m");
 }
 
-static int cmd_repl(neuronos_auto_ctx_t * ctx, int max_tokens, int max_steps, float temperature,
-                    const char * grammar_file, bool verbose) {
+/* ---- Chat history management ---- */
+typedef struct {
+    neuronos_chat_msg_t * msgs; /* array of messages                  */
+    char **               bufs; /* owned string buffers (role+content) */
+    size_t                len;  /* number of messages                  */
+    size_t                cap;  /* allocated capacity                  */
+} chat_history_t;
+
+static void chat_history_init(chat_history_t * h) {
+    h->cap  = 32;
+    h->len  = 0;
+    h->msgs = malloc(h->cap * sizeof(neuronos_chat_msg_t));
+    h->bufs = malloc(h->cap * sizeof(char *));
+}
+
+static void chat_history_push(chat_history_t * h, const char * role, const char * content) {
+    if (h->len >= h->cap) {
+        h->cap *= 2;
+        h->msgs = realloc(h->msgs, h->cap * sizeof(neuronos_chat_msg_t));
+        h->bufs = realloc(h->bufs, h->cap * sizeof(char *));
+    }
+    /* Store role and content in a single allocation: "role\0content\0" */
+    size_t rlen = strlen(role);
+    size_t clen = strlen(content);
+    char * buf  = malloc(rlen + 1 + clen + 1);
+    memcpy(buf, role, rlen + 1);
+    memcpy(buf + rlen + 1, content, clen + 1);
+
+    h->msgs[h->len].role    = buf;
+    h->msgs[h->len].content = buf + rlen + 1;
+    h->bufs[h->len]         = buf;
+    h->len++;
+}
+
+static void chat_history_clear(chat_history_t * h) {
+    for (size_t i = 0; i < h->len; i++) {
+        free(h->bufs[i]);
+    }
+    h->len = 0;
+}
+
+static void chat_history_free(chat_history_t * h) {
+    chat_history_clear(h);
+    free(h->msgs);
+    free(h->bufs);
+    h->msgs = NULL;
+    h->bufs = NULL;
+}
+
+static const char * DEFAULT_SYSTEM_PROMPT =
+    "You are NeuronOS, a fast and helpful AI assistant running locally. "
+    "Be concise, accurate, and direct.";
+
+static int cmd_repl_model(neuronos_model_t * model, int max_tokens, int max_steps, float temperature,
+                          const char * grammar_file, bool verbose) {
     print_banner();
 
-    fprintf(stderr, "Model: %s (%.1f score)\n", ctx->selected_model.name, ctx->selected_model.score);
-    fprintf(stderr, "Threads: %d | Batch: %d | Context: %d\n\n", ctx->tuning.n_threads, ctx->tuning.n_batch,
-            ctx->tuning.n_ctx);
+    neuronos_model_info_t minfo = neuronos_model_info(model);
+    fprintf(stderr, "Model: %s (%lldM params)\n", minfo.description,
+            (long long)(minfo.n_params / 1000000));
+    fprintf(stderr, "\n");
 
     /* Tool registry for agent mode */
     neuronos_tool_registry_t * tools = neuronos_tool_registry_create();
     neuronos_tool_register_defaults(tools, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
+
+    /* Chat history */
+    chat_history_t history;
+    chat_history_init(&history);
+    chat_history_push(&history, "system", DEFAULT_SYSTEM_PROMPT);
 
     bool agent_mode = false;
     char line[4096];
@@ -265,13 +346,29 @@ static int cmd_repl(neuronos_auto_ctx_t * ctx, int max_tokens, int max_steps, fl
             continue;
         }
 
+        if (strcmp(line, "/clear") == 0) {
+            chat_history_clear(&history);
+            chat_history_push(&history, "system", DEFAULT_SYSTEM_PROMPT);
+            fprintf(stderr, "Conversation cleared.\n");
+            continue;
+        }
+
+        if (strncmp(line, "/system ", 8) == 0) {
+            const char * new_sys = line + 8;
+            while (*new_sys == ' ') new_sys++;
+            chat_history_clear(&history);
+            chat_history_push(&history, "system", new_sys);
+            fprintf(stderr, "System prompt updated. History cleared.\n");
+            continue;
+        }
+
         if (strcmp(line, "/status") == 0) {
-            neuronos_hw_print_info(&ctx->hw);
-            neuronos_tune_print(&ctx->tuning);
-            neuronos_model_info_t info = neuronos_model_info(ctx->model);
+            neuronos_model_info_t info = neuronos_model_info(model);
+            neuronos_hal_print_info();
             fprintf(stderr, "Model: %s\n", info.description);
             fprintf(stderr, "Params: %lldM | Vocab: %d | Embd: %d\n", (long long)(info.n_params / 1000000),
                     info.n_vocab, info.n_embd);
+            fprintf(stderr, "Chat history: %zu messages\n", history.len);
             continue;
         }
 
@@ -291,11 +388,11 @@ static int cmd_repl(neuronos_auto_ctx_t * ctx, int max_tokens, int max_steps, fl
             if (strcmp(mode, "agent") == 0) {
                 agent_mode = true;
                 fprintf(stderr, "Switched to agent mode\n");
-            } else if (strcmp(mode, "gen") == 0 || strcmp(mode, "generate") == 0) {
+            } else if (strcmp(mode, "gen") == 0 || strcmp(mode, "generate") == 0 || strcmp(mode, "chat") == 0) {
                 agent_mode = false;
-                fprintf(stderr, "Switched to generation mode\n");
+                fprintf(stderr, "Switched to chat mode\n");
             } else {
-                fprintf(stderr, "Unknown mode: %s (use gen or agent)\n", mode);
+                fprintf(stderr, "Unknown mode: %s (use chat or agent)\n", mode);
             }
             continue;
         }
@@ -319,17 +416,33 @@ static int cmd_repl(neuronos_auto_ctx_t * ctx, int max_tokens, int max_steps, fl
             const char * task = line + 7;
             while (*task == ' ')
                 task++;
-            cmd_agent(ctx->model, task, max_tokens, max_steps, temperature, verbose);
+            cmd_agent(model, task, max_tokens, max_steps, temperature, verbose);
             continue;
         }
 
         /* ---- Default: generate or agent mode ---- */
         if (agent_mode) {
-            cmd_agent(ctx->model, line, max_tokens, max_steps, temperature, verbose);
+            cmd_agent(model, line, max_tokens, max_steps, temperature, verbose);
         } else {
+            /* Add user message to history */
+            chat_history_push(&history, "user", line);
+
+            /* Format conversation with chat template */
+            char * formatted = NULL;
+            neuronos_status_t st = neuronos_chat_format(
+                model, NULL, history.msgs, history.len, true, &formatted);
+
+            if (st != NEURONOS_OK || !formatted) {
+                fprintf(stderr, "Error: Failed to format chat template\n");
+                /* Remove the user message we just added */
+                free(history.bufs[history.len - 1]);
+                history.len--;
+                continue;
+            }
+
             char * grammar = load_grammar_file(grammar_file);
             neuronos_gen_params_t gparams = {
-                .prompt = line,
+                .prompt = formatted,
                 .max_tokens = max_tokens,
                 .temperature = temperature,
                 .top_p = 0.95f,
@@ -339,17 +452,30 @@ static int cmd_repl(neuronos_auto_ctx_t * ctx, int max_tokens, int max_steps, fl
                 .user_data = NULL,
                 .seed = 0,
             };
-            neuronos_gen_result_t result = neuronos_generate(ctx->model, gparams);
+            neuronos_gen_result_t result = neuronos_generate(model, gparams);
             printf("\n");
-            if (verbose) {
-                fprintf(stderr, "[%d tokens, %.1f ms, %.2f t/s]\n", result.n_tokens, result.elapsed_ms,
-                        result.tokens_per_s);
+
+            if (result.status == NEURONOS_OK && result.text && result.n_tokens > 0) {
+                /* Add assistant response to history */
+                chat_history_push(&history, "assistant", result.text);
+                if (verbose) {
+                    fprintf(stderr, "[%d tokens, %.1f ms, %.2f t/s, history=%zu msgs]\n",
+                            result.n_tokens, result.elapsed_ms, result.tokens_per_s, history.len);
+                }
+            } else {
+                fprintf(stderr, "[generation failed: status=%d]\n", result.status);
+                /* Remove the user message since generation failed */
+                free(history.bufs[history.len - 1]);
+                history.len--;
             }
+
+            neuronos_free(formatted);
             free(grammar);
             neuronos_gen_result_free(&result);
         }
     }
 
+    chat_history_free(&history);
     neuronos_tool_registry_free(tools);
     return 0;
 }
@@ -422,8 +548,14 @@ int main(int argc, char * argv[]) {
      * HWINFO — Hardware detection (no model needed)
      * ════════════════════════════════════════════════════════ */
     if (command && strcmp(command, "hwinfo") == 0) {
+        printf("[CLI] Initializing HAL explicitly...\n");
+        neuronos_hal_status_t st = neuronos_hal_init();
+        printf("[CLI] HAL Init status: %d (OK=%d)\n", (int)st, (int)NEURONOS_HAL_OK);
+
         neuronos_hw_info_t hw = neuronos_detect_hardware();
         neuronos_hw_print_info(&hw);
+        printf("\n");
+        neuronos_hal_print_info();
         return 0;
     }
 
@@ -535,11 +667,24 @@ int main(int argc, char * argv[]) {
         }
 
         int rc = 1;
-        if (strcmp(sub_cmd, "generate") == 0)
+        if (strcmp(sub_cmd, "generate") == 0 || strcmp(sub_cmd, "run") == 0)
             rc = cmd_generate(model, prompt, max_tokens, temperature, grammar_file, verbose);
         else if (strcmp(sub_cmd, "agent") == 0)
             rc = cmd_agent(model, prompt, max_tokens, max_steps, temperature, verbose);
-        else
+        else if (strcmp(sub_cmd, "serve") == 0) {
+            neuronos_server_params_t sparams = {.host = host, .port = port, .cors = true};
+            neuronos_status_t status = neuronos_server_start(model, NULL, sparams);
+            rc = (status == NEURONOS_OK) ? 0 : 1;
+        } else if (strcmp(sub_cmd, "mcp") == 0) {
+            neuronos_tool_registry_t * mcp_tools = neuronos_tool_registry_create();
+            neuronos_tool_register_defaults(mcp_tools,
+                                            NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
+            neuronos_status_t status = neuronos_mcp_serve_stdio(mcp_tools);
+            neuronos_tool_registry_free(mcp_tools);
+            rc = (status == NEURONOS_OK) ? 0 : 1;
+        } else if (strcmp(sub_cmd, "repl") == 0 || strcmp(sub_cmd, "chat") == 0) {
+            rc = cmd_repl_model(model, max_tokens, max_steps, temperature, grammar_file, verbose);
+        } else
             fprintf(stderr, "Unknown command: %s\n", sub_cmd);
 
         neuronos_model_free(model);
@@ -635,7 +780,7 @@ int main(int argc, char * argv[]) {
     }
     /* ── DEFAULT: Interactive REPL (zero args or unknown command) ── */
     else if (!command) {
-        rc = cmd_repl(&ctx, max_tokens, max_steps, temperature, grammar_file, verbose);
+        rc = cmd_repl_model(ctx.model, max_tokens, max_steps, temperature, grammar_file, verbose);
     } else {
         fprintf(stderr, "Unknown command: %s\n\n", command);
         print_usage(argv[0]);
