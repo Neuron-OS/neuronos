@@ -642,32 +642,11 @@ const neuronos_model_entry_t * neuronos_model_select_best(const neuronos_model_e
 }
 
 /* ============================================================
- * CONTEXT TRACKING (for compaction)
+ * CONTEXT TRACKING
  *
- * Simple token counting based on conversation history length.
- * Real implementation would track actual llama.cpp token counts.
+ * Implementations moved to neuronos_agent.c where the agent
+ * struct internals are accessible.
  * ============================================================ */
-
-int neuronos_context_token_count(const neuronos_agent_t * agent) {
-    /* Agent struct is opaque; we'll estimate from the model context */
-    (void)agent;
-    /* TODO: track actual token count in agent struct */
-    return 0;
-}
-
-int neuronos_context_capacity(const neuronos_agent_t * agent) {
-    (void)agent;
-    /* TODO: return model->context_size */
-    return 2048;
-}
-
-float neuronos_context_usage_ratio(const neuronos_agent_t * agent) {
-    int used = neuronos_context_token_count(agent);
-    int cap = neuronos_context_capacity(agent);
-    if (cap <= 0)
-        return 0.0f;
-    return (float)used / (float)cap;
-}
 
 /* ============================================================
  * AUTO-TUNING ENGINE

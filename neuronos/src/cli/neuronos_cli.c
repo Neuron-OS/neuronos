@@ -92,6 +92,7 @@ static void print_usage(const char * prog) {
             "  --models <dir>   Additional model search directory\n"
             "  --host <addr>    Server bind address (default: 127.0.0.1)\n"
             "  --port <port>    Server port (default: 8080)\n"
+            "  --mcp <file>     MCP client config (default: ~/.neuronos/mcp.json)\n"
             "  --verbose        Show debug info\n"
             "  --help           Show this help\n",
             NEURONOS_VERSION_STRING, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
@@ -172,7 +173,7 @@ static int cmd_generate(neuronos_model_t * model, const char * prompt, int max_t
 
 /* ---- Run agent command ---- */
 static int cmd_agent(neuronos_model_t * model, const char * prompt, int max_tokens, int max_steps, float temperature,
-                     bool verbose) {
+                     bool verbose, neuronos_memory_t * mem, const char * mcp_config_path) {
     if (!prompt) {
         fprintf(stderr, "Error: No task provided\n");
         return 1;
@@ -180,6 +181,52 @@ static int cmd_agent(neuronos_model_t * model, const char * prompt, int max_toke
 
     neuronos_tool_registry_t * tools = neuronos_tool_registry_create();
     neuronos_tool_register_defaults(tools, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
+
+    /* Register memory tools if memory is available */
+    if (mem) {
+        neuronos_tool_register_memory(tools, mem);
+    }
+
+    /* MCP Client: connect to external MCP servers and register their tools */
+    neuronos_mcp_client_t * mcp_client = NULL;
+    if (mcp_config_path) {
+        mcp_client = neuronos_mcp_client_create();
+        if (mcp_client) {
+            int loaded = neuronos_mcp_client_load_config(mcp_client, mcp_config_path);
+            if (loaded > 0) {
+                neuronos_mcp_client_connect(mcp_client);
+                int mcp_tools = neuronos_mcp_client_register_tools(mcp_client, tools);
+                fprintf(stderr, "MCP: %d external tools registered\n", mcp_tools);
+            } else {
+                fprintf(stderr, "MCP: no servers loaded from %s\n", mcp_config_path);
+                neuronos_mcp_client_free(mcp_client);
+                mcp_client = NULL;
+            }
+        }
+    } else {
+        /* Try default config path */
+        char default_path[512];
+        const char * home = getenv("HOME");
+        if (home) {
+            snprintf(default_path, sizeof(default_path), "%s/.neuronos/mcp.json", home);
+            FILE * f = fopen(default_path, "r");
+            if (f) {
+                fclose(f);
+                mcp_client = neuronos_mcp_client_create();
+                if (mcp_client) {
+                    int loaded = neuronos_mcp_client_load_config(mcp_client, default_path);
+                    if (loaded > 0) {
+                        neuronos_mcp_client_connect(mcp_client);
+                        int mcp_tools = neuronos_mcp_client_register_tools(mcp_client, tools);
+                        fprintf(stderr, "MCP: %d external tools registered (auto)\n", mcp_tools);
+                    } else {
+                        neuronos_mcp_client_free(mcp_client);
+                        mcp_client = NULL;
+                    }
+                }
+            }
+        }
+    }
 
     neuronos_agent_params_t aparams = {
         .max_steps = max_steps,
@@ -195,9 +242,15 @@ static int cmd_agent(neuronos_model_t * model, const char * prompt, int max_toke
         return 1;
     }
 
+    /* Attach persistent memory if available */
+    if (mem) {
+        neuronos_agent_set_memory(agent, mem);
+    }
+
     fprintf(stderr, "NeuronOS Agent v%s\n", neuronos_version());
     fprintf(stderr, "Task: %s\n", prompt);
-    fprintf(stderr, "Tools: %d registered\n", neuronos_tool_count(tools));
+    fprintf(stderr, "Tools: %d registered%s\n", neuronos_tool_count(tools),
+            mem ? " (memory enabled)" : "");
     fprintf(stderr, "Running...\n");
 
     neuronos_agent_result_t result = neuronos_agent_run(agent, prompt, agent_step, NULL);
@@ -216,6 +269,8 @@ static int cmd_agent(neuronos_model_t * model, const char * prompt, int max_toke
     neuronos_agent_result_free(&result);
     neuronos_agent_free(agent);
     neuronos_tool_registry_free(tools);
+    if (mcp_client)
+        neuronos_mcp_client_free(mcp_client);
     return rc;
 }
 
@@ -232,6 +287,9 @@ static void print_repl_help(void) {
                     "  /tokens <n>    Set max tokens\n"
                     "  /clear         Clear conversation history\n"
                     "  /system <text> Set system prompt\n"
+                    "  /memory        Show memory stats\n"
+                    "  /remember <k> <v>  Store a fact in memory\n"
+                    "  /recall <query>    Search memory\n"
                     "  /quit          Exit NeuronOS\n"
                     "\n"
                     "  Any other input → chat generation\n"
@@ -292,17 +350,62 @@ static const char * DEFAULT_SYSTEM_PROMPT =
     "Be concise, accurate, and direct.";
 
 static int cmd_repl_model(neuronos_model_t * model, int max_tokens, int max_steps, float temperature,
-                          const char * grammar_file, bool verbose) {
+                          const char * grammar_file, bool verbose, const char * mcp_config_path) {
     print_banner();
 
     neuronos_model_info_t minfo = neuronos_model_info(model);
     fprintf(stderr, "Model: %s (%lldM params)\n", minfo.description,
             (long long)(minfo.n_params / 1000000));
-    fprintf(stderr, "\n");
+
+    /* Open persistent memory */
+    neuronos_memory_t * mem = neuronos_memory_open(NULL); /* default: ~/.neuronos/mem.db */
+    if (mem) {
+        int fact_count = 0;
+        neuronos_memory_archival_stats(mem, &fact_count);
+        fprintf(stderr, "Memory: SQLite (persistent, %d facts stored)\n", fact_count);
+    } else {
+        fprintf(stderr, "Memory: unavailable (continuing without persistence)\n");
+    }
 
     /* Tool registry for agent mode */
     neuronos_tool_registry_t * tools = neuronos_tool_registry_create();
     neuronos_tool_register_defaults(tools, NEURONOS_CAP_FILESYSTEM | NEURONOS_CAP_NETWORK | NEURONOS_CAP_SHELL);
+    if (mem) {
+        neuronos_tool_register_memory(tools, mem);
+    }
+
+    /* MCP Client: connect to external MCP servers */
+    neuronos_mcp_client_t * mcp_client = NULL;
+    {
+        const char * cfg = mcp_config_path;
+        char default_path[512] = {0};
+        if (!cfg) {
+            const char * home = getenv("HOME");
+            if (home) {
+                snprintf(default_path, sizeof(default_path), "%s/.neuronos/mcp.json", home);
+                FILE * f = fopen(default_path, "r");
+                if (f) {
+                    fclose(f);
+                    cfg = default_path;
+                }
+            }
+        }
+        if (cfg) {
+            mcp_client = neuronos_mcp_client_create();
+            if (mcp_client) {
+                int loaded = neuronos_mcp_client_load_config(mcp_client, cfg);
+                if (loaded > 0) {
+                    neuronos_mcp_client_connect(mcp_client);
+                    int mcp_tools = neuronos_mcp_client_register_tools(mcp_client, tools);
+                    fprintf(stderr, "MCP: %d external tools from %d server(s)\n", mcp_tools, loaded);
+                } else {
+                    neuronos_mcp_client_free(mcp_client);
+                    mcp_client = NULL;
+                }
+            }
+        }
+    }
+    fprintf(stderr, "\n");
 
     /* Chat history */
     chat_history_t history;
@@ -381,6 +484,106 @@ static int cmd_repl_model(neuronos_model_t * model, int max_tokens, int max_step
             continue;
         }
 
+        /* ---- Memory commands ---- */
+        if (strcmp(line, "/memory") == 0) {
+            if (!mem) {
+                fprintf(stderr, "Memory not available.\n");
+            } else {
+                int fact_count = 0;
+                neuronos_memory_archival_stats(mem, &fact_count);
+                fprintf(stderr, "Archival memory: %d facts\n", fact_count);
+
+                /* Show core memory blocks */
+                const char * core_keys[] = {"persona", "human", "goals", NULL};
+                for (int k = 0; core_keys[k]; k++) {
+                    char * core_val = neuronos_memory_core_get(mem, core_keys[k]);
+                    if (core_val) {
+                        fprintf(stderr, "  [%s] %s\n", core_keys[k], core_val);
+                        free(core_val);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (strncmp(line, "/remember ", 10) == 0) {
+            if (!mem) {
+                fprintf(stderr, "Memory not available.\n");
+            } else {
+                const char * text = line + 10;
+                while (*text == ' ') text++;
+                if (*text == '\0') {
+                    fprintf(stderr, "Usage: /remember <fact to store>\n");
+                } else {
+                    int64_t row_id = neuronos_memory_archival_store(
+                        mem, text, text, "user", 0.8f);
+                    if (row_id >= 0)
+                        fprintf(stderr, "Stored in archival memory (id=%lld).\n", (long long)row_id);
+                    else
+                        fprintf(stderr, "Failed to store memory.\n");
+                }
+            }
+            continue;
+        }
+
+        if (strncmp(line, "/recall ", 7) == 0) {
+            if (!mem) {
+                fprintf(stderr, "Memory not available.\n");
+            } else {
+                const char * query = line + 7;
+                while (*query == ' ') query++;
+                if (*query == '\0') {
+                    fprintf(stderr, "Usage: /recall <search query>\n");
+                } else {
+                    neuronos_archival_entry_t * results = NULL;
+                    int n_results = 0;
+                    int st = neuronos_memory_archival_search(
+                        mem, query, 5, &results, &n_results);
+                    if (st == 0 && n_results > 0) {
+                        fprintf(stderr, "Found %d result(s):\n", n_results);
+                        for (int i = 0; i < n_results; i++) {
+                            fprintf(stderr, "  [%d] %s: %s (importance=%.2f)\n",
+                                    i + 1, results[i].key, results[i].value, results[i].importance);
+                        }
+                        neuronos_memory_archival_free(results, n_results);
+                    } else if (st == 0) {
+                        fprintf(stderr, "No results found for: %s\n", query);
+                    } else {
+                        fprintf(stderr, "Search failed (status=%d).\n", st);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (strncmp(line, "/core ", 6) == 0) {
+            if (!mem) {
+                fprintf(stderr, "Memory not available.\n");
+            } else {
+                /* Parse: /core <key> <value> */
+                const char * rest = line + 6;
+                while (*rest == ' ') rest++;
+                const char * space = strchr(rest, ' ');
+                if (!space) {
+                    fprintf(stderr, "Usage: /core <key> <value>\n");
+                } else {
+                    char key[64];
+                    size_t klen = (size_t)(space - rest);
+                    if (klen >= sizeof(key)) klen = sizeof(key) - 1;
+                    memcpy(key, rest, klen);
+                    key[klen] = '\0';
+                    const char * val = space + 1;
+                    while (*val == ' ') val++;
+                    int rc_mem = neuronos_memory_core_set(mem, key, val);
+                    if (rc_mem == 0)
+                        fprintf(stderr, "Core memory [%s] updated.\n", key);
+                    else
+                        fprintf(stderr, "Failed to update core memory (status=%d).\n", rc_mem);
+                }
+            }
+            continue;
+        }
+
         if (strncmp(line, "/mode ", 6) == 0) {
             const char * mode = line + 6;
             while (*mode == ' ')
@@ -416,13 +619,13 @@ static int cmd_repl_model(neuronos_model_t * model, int max_tokens, int max_step
             const char * task = line + 7;
             while (*task == ' ')
                 task++;
-            cmd_agent(model, task, max_tokens, max_steps, temperature, verbose);
+            cmd_agent(model, task, max_tokens, max_steps, temperature, verbose, mem, NULL);
             continue;
         }
 
         /* ---- Default: generate or agent mode ---- */
         if (agent_mode) {
-            cmd_agent(model, line, max_tokens, max_steps, temperature, verbose);
+            cmd_agent(model, line, max_tokens, max_steps, temperature, verbose, mem, NULL);
         } else {
             /* Add user message to history */
             chat_history_push(&history, "user", line);
@@ -477,6 +680,8 @@ static int cmd_repl_model(neuronos_model_t * model, int max_tokens, int max_step
 
     chat_history_free(&history);
     neuronos_tool_registry_free(tools);
+    if (mcp_client) neuronos_mcp_client_free(mcp_client);
+    if (mem) neuronos_memory_close(mem);
     return 0;
 }
 
@@ -494,6 +699,7 @@ int main(int argc, char * argv[]) {
     const char * host = "127.0.0.1";
     int port = 8080;
     bool verbose = false;
+    const char * mcp_config = NULL; /* --mcp <config.json> for MCP client */
 
     (void)n_threads; /* used in legacy mode */
 
@@ -516,6 +722,8 @@ int main(int argc, char * argv[]) {
             port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--verbose") == 0) {
             verbose = true;
+        } else if (strcmp(argv[i], "--mcp") == 0 && i + 1 < argc) {
+            mcp_config = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -530,7 +738,8 @@ int main(int argc, char * argv[]) {
             /* Skip option + its value */
             if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "-s") == 0 ||
                 strcmp(argv[i], "--temp") == 0 || strcmp(argv[i], "--grammar") == 0 ||
-                strcmp(argv[i], "--models") == 0 || strcmp(argv[i], "--host") == 0 || strcmp(argv[i], "--port") == 0) {
+                strcmp(argv[i], "--models") == 0 || strcmp(argv[i], "--host") == 0 || strcmp(argv[i], "--port") == 0 ||
+                strcmp(argv[i], "--mcp") == 0) {
                 i++; /* skip value */
             }
             continue;
@@ -658,7 +867,7 @@ int main(int argc, char * argv[]) {
             return 0;
         }
 
-        neuronos_model_params_t mparams = {.model_path = model_path, .context_size = 2048, .use_mmap = true};
+        neuronos_model_params_t mparams = {.model_path = model_path, .context_size = 0, .use_mmap = true};
         neuronos_model_t * model = neuronos_model_load(engine, mparams);
         if (!model) {
             fprintf(stderr, "Error: Failed to load model\n");
@@ -670,7 +879,7 @@ int main(int argc, char * argv[]) {
         if (strcmp(sub_cmd, "generate") == 0 || strcmp(sub_cmd, "run") == 0)
             rc = cmd_generate(model, prompt, max_tokens, temperature, grammar_file, verbose);
         else if (strcmp(sub_cmd, "agent") == 0)
-            rc = cmd_agent(model, prompt, max_tokens, max_steps, temperature, verbose);
+            rc = cmd_agent(model, prompt, max_tokens, max_steps, temperature, verbose, NULL, mcp_config);
         else if (strcmp(sub_cmd, "serve") == 0) {
             neuronos_server_params_t sparams = {.host = host, .port = port, .cors = true};
             neuronos_status_t status = neuronos_server_start(model, NULL, sparams);
@@ -683,7 +892,7 @@ int main(int argc, char * argv[]) {
             neuronos_tool_registry_free(mcp_tools);
             rc = (status == NEURONOS_OK) ? 0 : 1;
         } else if (strcmp(sub_cmd, "repl") == 0 || strcmp(sub_cmd, "chat") == 0) {
-            rc = cmd_repl_model(model, max_tokens, max_steps, temperature, grammar_file, verbose);
+            rc = cmd_repl_model(model, max_tokens, max_steps, temperature, grammar_file, verbose, mcp_config);
         } else
             fprintf(stderr, "Unknown command: %s\n", sub_cmd);
 
@@ -724,7 +933,7 @@ int main(int argc, char * argv[]) {
     }
     /* ── AGENT: one-shot agent ── */
     else if (command && strcmp(command, "agent") == 0) {
-        rc = cmd_agent(ctx.model, positional2, max_tokens, max_steps, temperature, verbose);
+        rc = cmd_agent(ctx.model, positional2, max_tokens, max_steps, temperature, verbose, NULL, mcp_config);
     }
     /* ── SERVE: HTTP server ── */
     else if (command && strcmp(command, "serve") == 0) {
@@ -770,7 +979,7 @@ int main(int argc, char * argv[]) {
             if (strcmp(positional2, "generate") == 0)
                 rc = cmd_generate(ctx.model, auto_prompt, max_tokens, temperature, grammar_file, verbose);
             else if (strcmp(positional2, "agent") == 0)
-                rc = cmd_agent(ctx.model, auto_prompt, max_tokens, max_steps, temperature, verbose);
+                rc = cmd_agent(ctx.model, auto_prompt, max_tokens, max_steps, temperature, verbose, NULL, mcp_config);
             else
                 fprintf(stderr, "Unknown auto sub-command: %s\n", positional2);
         } else {
@@ -780,7 +989,7 @@ int main(int argc, char * argv[]) {
     }
     /* ── DEFAULT: Interactive REPL (zero args or unknown command) ── */
     else if (!command) {
-        rc = cmd_repl_model(ctx.model, max_tokens, max_steps, temperature, grammar_file, verbose);
+        rc = cmd_repl_model(ctx.model, max_tokens, max_steps, temperature, grammar_file, verbose, mcp_config);
     } else {
         fprintf(stderr, "Unknown command: %s\n\n", command);
         print_usage(argv[0]);

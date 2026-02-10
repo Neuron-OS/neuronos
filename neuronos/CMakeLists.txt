@@ -107,6 +107,46 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 # ═════════════════════════════════════════════════════════════
+# Layer 2.5: Memory — SQLite-backed persistent memory
+# ═════════════════════════════════════════════════════════════
+set(SQLITE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/sqlite)
+
+set(MEMORY_SOURCES
+    ${SQLITE_DIR}/sqlite3.c
+    src/memory/neuronos_memory.c
+)
+
+add_library(neuronos_memory STATIC ${MEMORY_SOURCES})
+target_include_directories(neuronos_memory
+    PUBLIC  ${NEURONOS_INCLUDE_DIR}
+    PRIVATE ${SQLITE_DIR}
+)
+
+# SQLite compile flags: enable FTS5 full-text search, compile as core
+target_compile_definitions(neuronos_memory PRIVATE
+    SQLITE_CORE
+    SQLITE_ENABLE_FTS5
+    SQLITE_THREADSAFE=1
+    SQLITE_DEFAULT_MEMSTATUS=0
+    SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+    SQLITE_LIKE_DOESNT_MATCH_BLOBS
+    SQLITE_OMIT_DEPRECATED
+    SQLITE_OMIT_SHARED_CACHE
+)
+
+# Suppress warnings in SQLite amalgamation (3rd party code)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    set_source_files_properties(${SQLITE_DIR}/sqlite3.c
+        PROPERTIES COMPILE_FLAGS "-w")
+    set_source_files_properties(src/memory/neuronos_memory.c
+        PROPERTIES COMPILE_FLAGS "-Wall -Wextra -Wpedantic -Wno-unused-parameter")
+endif()
+
+# Link against pthreads and dl (required by SQLite on Linux)
+find_package(Threads REQUIRED)
+target_link_libraries(neuronos_memory PUBLIC Threads::Threads ${CMAKE_DL_LIBS} m)
+
+# ═════════════════════════════════════════════════════════════
 # Layer 3: Agent — Tool registry + ReAct loop
 # ═════════════════════════════════════════════════════════════
 set(AGENT_SOURCES
@@ -118,7 +158,7 @@ add_library(neuronos_agent STATIC ${AGENT_SOURCES})
 target_include_directories(neuronos_agent
     PUBLIC ${NEURONOS_INCLUDE_DIR}
 )
-target_link_libraries(neuronos_agent PUBLIC neuronos_engine)
+target_link_libraries(neuronos_agent PUBLIC neuronos_engine neuronos_memory)
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(neuronos_agent PRIVATE
@@ -131,6 +171,7 @@ endif()
 set(INTERFACE_SOURCES
     src/interface/neuronos_server.c
     src/mcp/neuronos_mcp_server.c
+    src/mcp/neuronos_mcp_client.c
 )
 
 add_library(neuronos_interface STATIC ${INTERFACE_SOURCES})
@@ -163,6 +204,11 @@ if(NEURONOS_BUILD_TESTS)
         ${LLAMA_SRC_DIR}/ggml/include
     )
     target_link_libraries(test_engine PRIVATE neuronos_agent neuronos_interface neuronos_engine neuronos_hal m)
+
+    # Memory test (no model needed — pure SQLite)
+    add_executable(test_memory tests/test_memory.c)
+    target_include_directories(test_memory PRIVATE ${NEURONOS_INCLUDE_DIR})
+    target_link_libraries(test_memory PRIVATE neuronos_memory m)
 endif()
 
 # ═════════════════════════════════════════════════════════════

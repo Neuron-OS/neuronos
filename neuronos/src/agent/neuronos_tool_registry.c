@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <dirent.h>
 
@@ -368,30 +369,114 @@ static neuronos_tool_result_t tool_read_file(const char * args_json, void * user
     memcpy(path, path_start, path_len);
     path[path_len] = '\0';
 
-    FILE * fp = fopen(path, "r");
-    free(path);
-
-    if (!fp) {
-        result.success = false;
-        result.error = strdup("File not found or cannot read");
-        return result;
+    /* Optional: extract start_line and end_line (1-indexed) */
+    int start_line = 0, end_line = 0;
+    const char * sl = strstr(args_json, "\"start_line\"");
+    if (sl) {
+        sl = strchr(sl + 12, ':');
+        if (sl) start_line = atoi(sl + 1);
+    }
+    const char * el = strstr(args_json, "\"end_line\"");
+    if (el) {
+        el = strchr(el + 10, ':');
+        if (el) end_line = atoi(el + 1);
     }
 
-    fseek(fp, 0, SEEK_END);
-    long fsize = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    FILE * fp = fopen(path, "r");
+    if (!fp) {
+        char err[512];
+        snprintf(err, sizeof(err), "File not found: %s", path);
+        free(path);
+        result.success = false;
+        result.error = strdup(err);
+        return result;
+    }
+    free(path);
 
-    /* Limit to 32KB for context budget */
-    if (fsize > 32 * 1024)
-        fsize = 32 * 1024;
+    if (start_line > 0) {
+        /* Line-range mode: read specific lines */
+        if (end_line <= 0) end_line = start_line + 100; /* default: 100 lines */
+        if (end_line < start_line) end_line = start_line;
 
-    char * content = malloc((size_t)fsize + 1);
-    size_t nread = fread(content, 1, (size_t)fsize, fp);
-    content[nread] = '\0';
-    fclose(fp);
+        size_t out_cap = 16384;
+        size_t out_len = 0;
+        char * out = malloc(out_cap);
+        char line_buf[4096];
+        int current_line = 0;
+
+        while (fgets(line_buf, (int)sizeof(line_buf), fp)) {
+            current_line++;
+            if (current_line < start_line) continue;
+            if (current_line > end_line) break;
+
+            size_t llen = strlen(line_buf);
+            /* Format: "NNN: content\n" */
+            char prefix[16];
+            int plen = snprintf(prefix, sizeof(prefix), "%d: ", current_line);
+
+            while (out_len + (size_t)plen + llen + 1 > out_cap) {
+                out_cap *= 2;
+                out = realloc(out, out_cap);
+            }
+            memcpy(out + out_len, prefix, (size_t)plen);
+            out_len += (size_t)plen;
+            memcpy(out + out_len, line_buf, llen);
+            out_len += llen;
+
+            if (out_len > 65536) break; /* safety limit */
+        }
+        out[out_len] = '\0';
+        fclose(fp);
+
+        if (out_len == 0) {
+            free(out);
+            result.success = true;
+            result.output = strdup("(no lines in requested range)");
+        } else {
+            result.success = true;
+            result.output = out;
+        }
+    } else {
+        /* Full file mode (original behavior, limit to 64KB) */
+        fseek(fp, 0, SEEK_END);
+        long fsize = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+
+        long limit = 64 * 1024;
+        bool truncated = false;
+        if (fsize > limit) {
+            fsize = limit;
+            truncated = true;
+        }
+
+        char * content = malloc((size_t)fsize + 64);
+        size_t nread = fread(content, 1, (size_t)fsize, fp);
+        fclose(fp);
+
+        if (truncated) {
+            nread += (size_t)sprintf(content + nread, "\n... [truncated at 64KB]");
+        }
+        content[nread] = '\0';
+
+        result.success = true;
+        result.output = content;
+    }
+    return result;
+}
+
+/* --- get_time tool --- */
+static neuronos_tool_result_t tool_get_time(const char * args_json, void * user_data) {
+    (void)args_json;
+    (void)user_data;
+    neuronos_tool_result_t result = {0};
+
+    time_t now = time(NULL);
+    struct tm * tm_info = localtime(&now);
+    char buf[128];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", tm_info);
 
     result.success = true;
-    result.output = content;
+    result.output = strdup(buf);
     return result;
 }
 
@@ -787,6 +872,450 @@ static neuronos_tool_result_t tool_http_get(const char * args_json, void * user_
     return result;
 }
 
+/* ============================================================
+ * MEMORY TOOLS (require NEURONOS_CAP_MEMORY)
+ *
+ * These tools give the agent explicit control over persistent memory:
+ *  - memory_store:       save a fact to archival memory
+ *  - memory_search:      full-text search archival memory
+ *  - memory_core_update: update a core memory block
+ *
+ * user_data points to a neuronos_memory_t* (set at registration time).
+ * ============================================================ */
+
+/* Helper: extract a JSON string field value (reused for memory tools) */
+static char * mem_json_extract(const char * json, const char * field) {
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", field);
+    const char * pos = strstr(json, pattern);
+    if (!pos) return NULL;
+    pos += strlen(pattern);
+    while (*pos == ' ' || *pos == '\t' || *pos == ':') pos++;
+    if (*pos != '"') return NULL;
+    pos++;
+    const char * start = pos;
+    while (*pos && !(*pos == '"' && *(pos - 1) != '\\')) pos++;
+    size_t len = (size_t)(pos - start);
+    char * val = malloc(len + 1);
+    memcpy(val, start, len);
+    val[len] = '\0';
+    return val;
+}
+
+/* --- memory_store tool --- */
+static neuronos_tool_result_t tool_memory_store(const char * args_json, void * user_data) {
+    neuronos_tool_result_t result = {0};
+    neuronos_memory_t * mem = (neuronos_memory_t *)user_data;
+
+    if (!mem) {
+        result.success = false;
+        result.error = strdup("Memory not initialized");
+        return result;
+    }
+
+    char * key = mem_json_extract(args_json, "key");
+    char * value = mem_json_extract(args_json, "value");
+    char * category = mem_json_extract(args_json, "category");
+
+    if (!key || !value) {
+        free(key); free(value); free(category);
+        result.success = false;
+        result.error = strdup("Missing 'key' or 'value' argument");
+        return result;
+    }
+
+    int64_t id = neuronos_memory_archival_store(mem, key, value, category, 0.5f);
+
+    if (id >= 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Stored fact '%s' (id=%lld)", key, (long long)id);
+        result.success = true;
+        result.output = strdup(buf);
+    } else {
+        result.success = false;
+        result.error = strdup("Failed to store in memory");
+    }
+
+    free(key); free(value); free(category);
+    return result;
+}
+
+/* --- memory_search tool --- */
+static neuronos_tool_result_t tool_memory_search(const char * args_json, void * user_data) {
+    neuronos_tool_result_t result = {0};
+    neuronos_memory_t * mem = (neuronos_memory_t *)user_data;
+
+    if (!mem) {
+        result.success = false;
+        result.error = strdup("Memory not initialized");
+        return result;
+    }
+
+    char * query = mem_json_extract(args_json, "query");
+    if (!query) {
+        result.success = false;
+        result.error = strdup("Missing 'query' argument");
+        return result;
+    }
+
+    neuronos_archival_entry_t * entries = NULL;
+    int count = 0;
+    int rc = neuronos_memory_archival_search(mem, query, 5, &entries, &count);
+    free(query);
+
+    if (rc != 0) {
+        result.success = false;
+        result.error = strdup("Memory search failed");
+        return result;
+    }
+
+    if (count == 0) {
+        neuronos_memory_archival_free(entries, count);
+        result.success = true;
+        result.output = strdup("No results found.");
+        return result;
+    }
+
+    /* Format results as JSON array */
+    size_t cap = 4096;
+    char * buf = malloc(cap);
+    size_t len = 0;
+    len += (size_t)snprintf(buf + len, cap - len, "[");
+    for (int i = 0; i < count; i++) {
+        if (i > 0) len += (size_t)snprintf(buf + len, cap - len, ",");
+        size_t need = strlen(entries[i].key) + strlen(entries[i].value) + 128;
+        while (len + need > cap) { cap *= 2; buf = realloc(buf, cap); }
+        len += (size_t)snprintf(buf + len, cap - len,
+            "{\"key\":\"%s\",\"value\":\"%s\",\"category\":\"%s\"}",
+            entries[i].key, entries[i].value,
+            entries[i].category ? entries[i].category : "general");
+    }
+    len += (size_t)snprintf(buf + len, cap - len, "]");
+
+    neuronos_memory_archival_free(entries, count);
+    result.success = true;
+    result.output = buf;
+    return result;
+}
+
+/* --- memory_core_update tool --- */
+static neuronos_tool_result_t tool_memory_core_update(const char * args_json, void * user_data) {
+    neuronos_tool_result_t result = {0};
+    neuronos_memory_t * mem = (neuronos_memory_t *)user_data;
+
+    if (!mem) {
+        result.success = false;
+        result.error = strdup("Memory not initialized");
+        return result;
+    }
+
+    char * label = mem_json_extract(args_json, "label");
+    char * content = mem_json_extract(args_json, "content");
+
+    if (!label || !content) {
+        free(label); free(content);
+        result.success = false;
+        result.error = strdup("Missing 'label' or 'content' argument");
+        return result;
+    }
+
+    int rc = neuronos_memory_core_set(mem, label, content);
+
+    if (rc == 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Updated core memory block '%s'", label);
+        result.success = true;
+        result.output = strdup(buf);
+    } else {
+        result.success = false;
+        result.error = strdup("Failed to update core memory");
+    }
+
+    free(label); free(content);
+    return result;
+}
+
+/* --- read_pdf tool ---
+ * Extract text from PDF files using pdftotext (poppler-utils).
+ * Falls back to basic raw text extraction if pdftotext is not available.
+ * Supports optional page ranges.
+ */
+static neuronos_tool_result_t tool_read_pdf(const char * args_json, void * user_data) {
+    (void)user_data;
+    neuronos_tool_result_t result = {0};
+
+    /* Extract "path" */
+    const char * path_start = strstr(args_json, "\"path\"");
+    if (!path_start) {
+        result.success = false;
+        result.error = strdup("Missing 'path' argument");
+        return result;
+    }
+    path_start = strchr(path_start + 6, '"');
+    if (!path_start) {
+        result.success = false;
+        result.error = strdup("Invalid 'path'");
+        return result;
+    }
+    path_start++;
+    const char * path_end = strchr(path_start, '"');
+    if (!path_end) {
+        result.success = false;
+        result.error = strdup("Invalid 'path'");
+        return result;
+    }
+
+    size_t path_len = (size_t)(path_end - path_start);
+    char path[1024];
+    if (path_len >= sizeof(path)) {
+        result.success = false;
+        result.error = strdup("Path too long");
+        return result;
+    }
+    memcpy(path, path_start, path_len);
+    path[path_len] = '\0';
+
+    /* Validate path: reject shell metacharacters */
+    if (!is_safe_path(path, path_len)) {
+        result.success = false;
+        result.error = strdup("Path contains disallowed characters");
+        return result;
+    }
+
+    /* Check file exists */
+    FILE * check = fopen(path, "rb");
+    if (!check) {
+        char err[1280];
+        snprintf(err, sizeof(err), "File not found: %s", path);
+        result.success = false;
+        result.error = strdup(err);
+        return result;
+    }
+
+    /* Verify PDF magic: %PDF */
+    char magic[5] = {0};
+    size_t nr = fread(magic, 1, 4, check);
+    fclose(check);
+    if (nr < 4 || strncmp(magic, "%PDF", 4) != 0) {
+        result.success = false;
+        result.error = strdup("Not a valid PDF file (missing %PDF header)");
+        return result;
+    }
+
+    /* Optional "pages" field: "1-5", "3", "first" / "last" range */
+    int first_page = 0; /* 0 = all */
+    int last_page = 0;
+    const char * pages_start = strstr(args_json, "\"pages\"");
+    if (pages_start) {
+        pages_start = strchr(pages_start + 7, '"');
+        if (pages_start) {
+            pages_start++;
+            const char * pages_end = strchr(pages_start, '"');
+            if (pages_end) {
+                char pages_buf[64] = {0};
+                size_t plen = (size_t)(pages_end - pages_start);
+                if (plen > 0 && plen < sizeof(pages_buf)) {
+                    memcpy(pages_buf, pages_start, plen);
+                    /* Parse "N" or "N-M" */
+                    char * dash = strchr(pages_buf, '-');
+                    if (dash) {
+                        *dash = '\0';
+                        first_page = atoi(pages_buf);
+                        last_page = atoi(dash + 1);
+                    } else {
+                        first_page = atoi(pages_buf);
+                        last_page = first_page;
+                    }
+                    if (first_page < 1) first_page = 1;
+                    if (last_page < first_page) last_page = first_page;
+                }
+            }
+        }
+    }
+
+    /* Build pdftotext command */
+    char cmd[2048];
+    if (first_page > 0) {
+        snprintf(cmd, sizeof(cmd),
+                 "pdftotext -f %d -l %d -layout '%s' - 2>/dev/null",
+                 first_page, last_page, path);
+    } else {
+        snprintf(cmd, sizeof(cmd),
+                 "pdftotext -layout '%s' - 2>/dev/null",
+                 path);
+    }
+
+    FILE * fp = popen(cmd, "r");
+    if (!fp) {
+        result.success = false;
+        result.error = strdup("pdftotext not available. Install poppler-utils.");
+        return result;
+    }
+
+    /* Read output (limit to 128KB for context window friendliness) */
+    size_t out_cap = 8192;
+    size_t out_len = 0;
+    char * out_buf = malloc(out_cap);
+    if (!out_buf) {
+        pclose(fp);
+        result.success = false;
+        result.error = strdup("Memory allocation failed");
+        return result;
+    }
+
+    static const size_t MAX_PDF_OUTPUT = 128 * 1024;
+    char chunk[4096];
+    while (fgets(chunk, (int)sizeof(chunk), fp)) {
+        size_t clen = strlen(chunk);
+        while (out_len + clen + 64 > out_cap) {
+            out_cap *= 2;
+            if (out_cap > MAX_PDF_OUTPUT + 256) out_cap = MAX_PDF_OUTPUT + 256;
+            char * tmp = realloc(out_buf, out_cap);
+            if (!tmp) break;
+            out_buf = tmp;
+        }
+        if (out_len + clen >= MAX_PDF_OUTPUT) {
+            /* Truncate and add notice */
+            size_t remain = MAX_PDF_OUTPUT - out_len;
+            if (remain > 0) {
+                memcpy(out_buf + out_len, chunk, remain);
+                out_len += remain;
+            }
+            out_len += (size_t)snprintf(out_buf + out_len, 64,
+                                        "\n... [truncated at 128KB]");
+            break;
+        }
+        memcpy(out_buf + out_len, chunk, clen);
+        out_len += clen;
+    }
+    out_buf[out_len] = '\0';
+
+    int status = pclose(fp);
+
+    /* If pdftotext failed (not installed or error), try basic fallback */
+    if (status != 0 || out_len == 0) {
+        /* Fallback: extract raw text strings from PDF using basic parsing.
+         * PDF text objects appear between BT...ET operators, with operators
+         * like Tj, TJ, ', " containing the actual text strings.
+         * This is a very basic extractor for simple/uncompressed PDFs. */
+        FILE * raw = fopen(path, "rb");
+        if (!raw) {
+            free(out_buf);
+            result.success = false;
+            result.error = strdup("pdftotext failed and cannot read file for fallback");
+            return result;
+        }
+
+        fseek(raw, 0, SEEK_END);
+        long fsize = ftell(raw);
+        fseek(raw, 0, SEEK_SET);
+
+        /* Limit raw reading to 2MB */
+        if (fsize > 2 * 1024 * 1024) fsize = 2 * 1024 * 1024;
+
+        char * raw_buf = malloc((size_t)fsize + 1);
+        if (!raw_buf) {
+            fclose(raw);
+            free(out_buf);
+            result.success = false;
+            result.error = strdup("Memory allocation failed");
+            return result;
+        }
+
+        size_t raw_read = fread(raw_buf, 1, (size_t)fsize, raw);
+        fclose(raw);
+        raw_buf[raw_read] = '\0';
+
+        /* Extract printable text blocks between parentheses in BT..ET sections.
+         * PDF text strings are enclosed in () for literal strings. */
+        out_len = 0;
+        out_cap = 8192;
+        free(out_buf);
+        out_buf = malloc(out_cap);
+
+        bool in_text = false;
+        for (size_t i = 0; i + 1 < raw_read; i++) {
+            /* BT = Begin Text object */
+            if (raw_buf[i] == 'B' && raw_buf[i + 1] == 'T' &&
+                (i == 0 || raw_buf[i - 1] == ' ' || raw_buf[i - 1] == '\n')) {
+                in_text = true;
+                continue;
+            }
+            /* ET = End Text object */
+            if (in_text && raw_buf[i] == 'E' && raw_buf[i + 1] == 'T' &&
+                (i == 0 || raw_buf[i - 1] == ' ' || raw_buf[i - 1] == '\n')) {
+                in_text = false;
+                /* Add newline between text objects */
+                if (out_len > 0 && out_buf[out_len - 1] != '\n') {
+                    if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                    out_buf[out_len++] = '\n';
+                }
+                continue;
+            }
+            /* Extract literal string content from (...) */
+            if (in_text && raw_buf[i] == '(') {
+                i++;
+                int paren_depth = 1;
+                while (i < raw_read && paren_depth > 0) {
+                    if (raw_buf[i] == '\\') {
+                        i++; /* skip escaped char */
+                        if (i < raw_read) {
+                            char c = raw_buf[i];
+                            /* Decode common escapes */
+                            if (c == 'n') c = '\n';
+                            else if (c == 'r') c = '\r';
+                            else if (c == 't') c = '\t';
+                            if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                            out_buf[out_len++] = c;
+                        }
+                    } else if (raw_buf[i] == '(') {
+                        paren_depth++;
+                        if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                        out_buf[out_len++] = '(';
+                    } else if (raw_buf[i] == ')') {
+                        paren_depth--;
+                        if (paren_depth > 0) {
+                            if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                            out_buf[out_len++] = ')';
+                        }
+                    } else {
+                        if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                        out_buf[out_len++] = raw_buf[i];
+                    }
+                    i++;
+                }
+            }
+
+            if (out_len >= MAX_PDF_OUTPUT) {
+                out_len += (size_t)snprintf(out_buf + out_len, 64, "\n... [truncated]");
+                break;
+            }
+        }
+        out_buf[out_len] = '\0';
+        free(raw_buf);
+
+        if (out_len == 0) {
+            free(out_buf);
+            result.success = false;
+            result.error = strdup(
+                "Could not extract text. The PDF may use compressed streams. "
+                "Install poppler-utils (apt install poppler-utils) for full support.");
+            return result;
+        }
+
+        /* Prefix with notice about fallback mode */
+        char * final = malloc(out_len + 128);
+        int hdr = snprintf(final, 128, "[Note: basic extraction mode, install poppler-utils for better results]\n");
+        memcpy(final + hdr, out_buf, out_len + 1);
+        free(out_buf);
+        out_buf = final;
+    }
+
+    result.success = true;
+    result.output = out_buf;
+    return result;
+}
+
 int neuronos_tool_register_defaults(neuronos_tool_registry_t * reg, uint32_t allowed_caps) {
     if (!reg)
         return -1;
@@ -809,9 +1338,11 @@ int neuronos_tool_register_defaults(neuronos_tool_registry_t * reg, uint32_t all
     if (allowed_caps & NEURONOS_CAP_FILESYSTEM) {
         neuronos_tool_desc_t desc_read = {
             .name = "read_file",
-            .description = "Read the contents of a file (max 32KB).",
+            .description = "Read a file. Use start_line/end_line to read specific lines (1-indexed).",
             .args_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":"
-                                "\"File path to read\"}},\"required\":[\"path\"]}",
+                                "\"File path to read\"},\"start_line\":{\"type\":\"integer\",\"description\":"
+                                "\"First line to read (1-indexed, optional)\"},\"end_line\":{\"type\":\"integer\","
+                                "\"description\":\"Last line to read (1-indexed, optional)\"}},\"required\":[\"path\"]}",
             .execute = tool_read_file,
             .user_data = NULL,
             .required_caps = NEURONOS_CAP_FILESYSTEM,
@@ -856,6 +1387,23 @@ int neuronos_tool_register_defaults(neuronos_tool_registry_t * reg, uint32_t all
         };
         if (neuronos_tool_register(reg, &desc_search) == 0)
             registered++;
+
+        neuronos_tool_desc_t desc_read_pdf = {
+            .name = "read_pdf",
+            .description = "Extract text from a PDF file. Uses pdftotext for best results, with basic fallback. "
+                           "Supports optional page range.",
+            .args_schema_json =
+                "{\"type\":\"object\",\"properties\":{"
+                "\"path\":{\"type\":\"string\",\"description\":\"Path to the PDF file\"},"
+                "\"pages\":{\"type\":\"string\",\"description\":\"Page range: '3' for single page, '1-5' for range "
+                "(optional, default: all pages)\"}"
+                "},\"required\":[\"path\"]}",
+            .execute = tool_read_pdf,
+            .user_data = NULL,
+            .required_caps = NEURONOS_CAP_FILESYSTEM,
+        };
+        if (neuronos_tool_register(reg, &desc_read_pdf) == 0)
+            registered++;
     }
 
     if (allowed_caps & NEURONOS_CAP_NETWORK) {
@@ -886,6 +1434,73 @@ int neuronos_tool_register_defaults(neuronos_tool_registry_t * reg, uint32_t all
         if (neuronos_tool_register(reg, &desc_calc) == 0)
             registered++;
     }
+
+    {
+        neuronos_tool_desc_t desc_time = {
+            .name = "get_time",
+            .description = "Get the current date and time.",
+            .args_schema_json = "{\"type\":\"object\",\"properties\":{}}",
+            .execute = tool_get_time,
+            .user_data = NULL,
+            .required_caps = 0,
+        };
+        if (neuronos_tool_register(reg, &desc_time) == 0)
+            registered++;
+    }
+
+    return registered;
+}
+
+/* Register memory tools (call after memory is attached to agent).
+ * user_data is the neuronos_memory_t* pointer. */
+int neuronos_tool_register_memory(neuronos_tool_registry_t * reg, void * memory_ptr) {
+    if (!reg || !memory_ptr) return 0;
+    int registered = 0;
+
+    neuronos_tool_desc_t desc_store = {
+        .name = "memory_store",
+        .description = "Save a fact to long-term memory. Use this to remember important information "
+                       "for future conversations (e.g., user preferences, key facts, decisions).",
+        .args_schema_json =
+            "{\"type\":\"object\",\"properties\":{"
+            "\"key\":{\"type\":\"string\",\"description\":\"Short label for the fact\"},"
+            "\"value\":{\"type\":\"string\",\"description\":\"The information to remember\"},"
+            "\"category\":{\"type\":\"string\",\"description\":\"Category tag (optional)\"}"
+            "},\"required\":[\"key\",\"value\"]}",
+        .execute = tool_memory_store,
+        .user_data = memory_ptr,
+        .required_caps = NEURONOS_CAP_MEMORY,
+    };
+    if (neuronos_tool_register(reg, &desc_store) == 0) registered++;
+
+    neuronos_tool_desc_t desc_search = {
+        .name = "memory_search",
+        .description = "Search long-term memory for relevant facts. Use this when you need to recall "
+                       "previously stored information or find context from past conversations.",
+        .args_schema_json =
+            "{\"type\":\"object\",\"properties\":{"
+            "\"query\":{\"type\":\"string\",\"description\":\"Search query (natural language)\"}"
+            "},\"required\":[\"query\"]}",
+        .execute = tool_memory_search,
+        .user_data = memory_ptr,
+        .required_caps = NEURONOS_CAP_MEMORY,
+    };
+    if (neuronos_tool_register(reg, &desc_search) == 0) registered++;
+
+    neuronos_tool_desc_t desc_core = {
+        .name = "memory_core_update",
+        .description = "Update a core memory block (persona, human, instructions). "
+                       "Core memory is always visible in your context and shapes your behavior.",
+        .args_schema_json =
+            "{\"type\":\"object\",\"properties\":{"
+            "\"label\":{\"type\":\"string\",\"description\":\"Block name: persona, human, or instructions\"},"
+            "\"content\":{\"type\":\"string\",\"description\":\"New content for the block\"}"
+            "},\"required\":[\"label\",\"content\"]}",
+        .execute = tool_memory_core_update,
+        .user_data = memory_ptr,
+        .required_caps = NEURONOS_CAP_MEMORY,
+    };
+    if (neuronos_tool_register(reg, &desc_core) == 0) registered++;
 
     return registered;
 }

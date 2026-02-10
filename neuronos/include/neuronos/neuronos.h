@@ -1,6 +1,6 @@
 /* ============================================================
  * NeuronOS Agent Engine — Public API
- * Version 0.7.0
+ * Version 0.8.0
  *
  * The fastest AI agent engine in the world.
  * Universal, offline, runs on any device.
@@ -22,9 +22,9 @@ extern "C" {
 
 /* ---- Version ---- */
 #define NEURONOS_VERSION_MAJOR 0
-#define NEURONOS_VERSION_MINOR 7
+#define NEURONOS_VERSION_MINOR 8
 #define NEURONOS_VERSION_PATCH 0
-#define NEURONOS_VERSION_STRING "0.7.0"
+#define NEURONOS_VERSION_STRING "0.8.0"
 
 /* ---- Opaque types ---- */
 typedef struct neuronos_engine neuronos_engine_t;
@@ -71,7 +71,7 @@ const char * neuronos_version(void);
  * ============================================================ */
 typedef struct {
     const char * model_path; /* path to GGUF file                    */
-    int context_size;        /* 0 = model default (typically 2048)   */
+    int context_size;        /* 0 = auto (min of n_ctx_train, 8192)  */
     bool use_mmap;           /* memory-map model (default: true)     */
 } neuronos_model_params_t;
 
@@ -90,6 +90,9 @@ typedef struct {
 } neuronos_model_info_t;
 
 neuronos_model_info_t neuronos_model_info(const neuronos_model_t * model);
+
+/* Get the active context size (number of tokens allocated) */
+int neuronos_model_context_size(const neuronos_model_t * model);
 
 /* ============================================================
  * GENERATE: Text generation (inference)
@@ -202,6 +205,10 @@ int neuronos_tool_register(neuronos_tool_registry_t * reg, const neuronos_tool_d
  * Only registers tools whose required_caps are within allowed_caps. */
 int neuronos_tool_register_defaults(neuronos_tool_registry_t * reg, uint32_t allowed_caps);
 
+/* Register memory tools (memory_store, memory_search, memory_core_update).
+ * Call after attaching memory to the agent. memory_ptr is neuronos_memory_t*. */
+int neuronos_tool_register_memory(neuronos_tool_registry_t * reg, void * memory_ptr);
+
 /* Execute a tool by name */
 neuronos_tool_result_t neuronos_tool_execute(neuronos_tool_registry_t * reg, const char * tool_name,
                                              const char * args_json);
@@ -257,6 +264,10 @@ neuronos_agent_t * neuronos_agent_create(neuronos_model_t * model, neuronos_tool
 
 void neuronos_agent_free(neuronos_agent_t * agent);
 
+/* Attach persistent memory to an agent (optional).
+ * The agent does NOT own the memory — caller must close it after agent_free(). */
+void neuronos_agent_set_memory(neuronos_agent_t * agent, neuronos_memory_t * mem);
+
 /* Run the agent on a user query */
 neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char * user_input,
                                            neuronos_agent_step_cb on_step, void * user_data);
@@ -267,17 +278,103 @@ void neuronos_agent_result_free(neuronos_agent_result_t * result);
 void neuronos_agent_set_system_prompt(neuronos_agent_t * agent, const char * system_prompt);
 
 /* ============================================================
- * MEMORY: Persistent key-value store
+ * MEMORY: SQLite-backed persistent memory (MemGPT-inspired)
+ *
+ * 3-tier architecture:
+ *  1. Core Memory  — personality/instructions blocks (in prompt)
+ *  2. Recall Memory — full conversation history (SQLite)
+ *  3. Archival Memory — long-term facts & knowledge (SQLite FTS5)
+ *
+ * DB default path: ~/.neuronos/mem.db
  * ============================================================ */
 
-/* Open memory store (NULL path = in-memory only) */
+/* Open/close memory store. NULL path = default ~/.neuronos/mem.db.
+ * Pass ":memory:" for a purely in-memory store. */
 neuronos_memory_t * neuronos_memory_open(const char * db_path);
 void neuronos_memory_close(neuronos_memory_t * mem);
 
+/* ---- Core Memory (in-prompt blocks) ---- */
+
+/* Set/get a core memory block (e.g. "persona", "human", "instructions").
+ * Blocks are stored in DB and injected into the system prompt. */
+int neuronos_memory_core_set(neuronos_memory_t * mem, const char * label, const char * content);
+char * neuronos_memory_core_get(neuronos_memory_t * mem, const char * label);
+int neuronos_memory_core_append(neuronos_memory_t * mem, const char * label, const char * text);
+
+/* Get all core blocks as a formatted string for prompt injection.
+ * Format: "<label>:\n<content>\n---\n..." Caller must free. */
+char * neuronos_memory_core_dump(neuronos_memory_t * mem);
+
+/* ---- Recall Memory (conversation log) ---- */
+
+typedef struct {
+    int64_t id;            /* row id                            */
+    const char * role;     /* "system", "user", "assistant"     */
+    const char * content;  /* message text                      */
+    int64_t timestamp;     /* unix epoch seconds                */
+    int token_count;       /* estimated token count             */
+    int64_t session_id;    /* conversation session id           */
+    int64_t summary_of;    /* id of message this summarizes (0 = original) */
+} neuronos_recall_entry_t;
+
+/* Log a message to recall memory. Returns row id or -1 on error. */
+int64_t neuronos_memory_recall_add(neuronos_memory_t * mem, int64_t session_id,
+                                   const char * role, const char * content, int token_count);
+
+/* Get recent messages from current session (ordered by timestamp DESC).
+ * Caller must free with neuronos_memory_recall_free(). */
+int neuronos_memory_recall_recent(neuronos_memory_t * mem, int64_t session_id,
+                                  int limit, neuronos_recall_entry_t ** out_entries, int * out_count);
+
+/* Full-text search on recall memory. Caller frees with neuronos_memory_recall_free(). */
+int neuronos_memory_recall_search(neuronos_memory_t * mem, const char * query,
+                                  int max_results, neuronos_recall_entry_t ** out_entries, int * out_count);
+
+void neuronos_memory_recall_free(neuronos_recall_entry_t * entries, int count);
+
+/* Get total recall message count and total token count for stats in prompt. */
+int neuronos_memory_recall_stats(neuronos_memory_t * mem, int64_t session_id,
+                                 int * out_msg_count, int * out_token_count);
+
+/* ---- Archival Memory (long-term facts) ---- */
+
+typedef struct {
+    int64_t id;             /* row id                            */
+    const char * key;       /* short label / title               */
+    const char * value;     /* content / fact                    */
+    const char * category;  /* optional category tag             */
+    float importance;       /* 0.0 - 1.0                        */
+    int64_t created_at;     /* unix epoch                        */
+    int64_t updated_at;     /* unix epoch                        */
+    int access_count;       /* how many times recalled           */
+} neuronos_archival_entry_t;
+
+/* Store a fact in archival memory. Returns row id or -1 on error. */
+int64_t neuronos_memory_archival_store(neuronos_memory_t * mem, const char * key,
+                                       const char * value, const char * category, float importance);
+
+/* Recall a fact by key. Caller must free the returned string. Returns NULL if not found. */
+char * neuronos_memory_archival_recall(neuronos_memory_t * mem, const char * key);
+
+/* Full-text search on archival memory. Caller frees with neuronos_memory_archival_free(). */
+int neuronos_memory_archival_search(neuronos_memory_t * mem, const char * query,
+                                    int max_results, neuronos_archival_entry_t ** out_entries, int * out_count);
+
+void neuronos_memory_archival_free(neuronos_archival_entry_t * entries, int count);
+
+/* Get archival stats for prompt injection (A/R stats like MemGPT). */
+int neuronos_memory_archival_stats(neuronos_memory_t * mem, int * out_fact_count);
+
+/* ---- Session management ---- */
+
+/* Create a new session. Returns session_id. */
+int64_t neuronos_memory_session_create(neuronos_memory_t * mem);
+
+/* ---- Legacy compatibility (maps to archival store/recall) ---- */
 int neuronos_memory_store(neuronos_memory_t * mem, const char * key, const char * value);
-char * neuronos_memory_recall(neuronos_memory_t * mem, const char * key); /* caller must free */
-int neuronos_memory_search(neuronos_memory_t * mem, const char * query, char *** results, int * n_results,
-                           int max_results);
+char * neuronos_memory_recall(neuronos_memory_t * mem, const char * key);
+int neuronos_memory_search(neuronos_memory_t * mem, const char * query, char *** results,
+                           int * n_results, int max_results);
 void neuronos_memory_free_results(char ** results, int n);
 
 /* ============================================================
@@ -388,6 +485,12 @@ int neuronos_context_capacity(const neuronos_agent_t * agent);
 /* Get context usage ratio (0.0 - 1.0) */
 float neuronos_context_usage_ratio(const neuronos_agent_t * agent);
 
+/* Compact context: summarize oldest messages, shift KV cache.
+ * Uses the model itself to generate a summary of old context.
+ * Saves summary to recall memory if memory is attached.
+ * Returns the number of tokens freed, or negative on error. */
+int neuronos_context_compact(neuronos_agent_t * agent);
+
 /* ============================================================
  * AUTO-TUNING: Optimal parameters for maximum performance
  *
@@ -485,6 +588,77 @@ neuronos_status_t neuronos_server_start(neuronos_model_t * model, neuronos_tool_
  * writes responses to stdout. Logging goes to stderr.
  * Returns NEURONOS_OK when stdin is closed. */
 neuronos_status_t neuronos_mcp_serve_stdio(neuronos_tool_registry_t * tools);
+
+/* ============================================================
+ * MCP CLIENT (Model Context Protocol — STDIO/HTTP transport)
+ *
+ * Connects to external MCP servers and discovers their tools.
+ * The agent can then use 10,000+ tools from the MCP ecosystem:
+ *   - Filesystem, GitHub, databases, web search, etc.
+ *   - Any MCP server published as npm/pip/binary
+ *
+ * Config: ~/.neuronos/mcp.json (Claude Desktop format)
+ * Transport: STDIO (fork+exec child process, pipe JSON-RPC)
+ *
+ * First MCP client in pure C. Zero dependencies.
+ * ============================================================ */
+
+typedef struct neuronos_mcp_client neuronos_mcp_client_t;
+
+/* Transport types for MCP server connections */
+typedef enum {
+    NEURONOS_MCP_TRANSPORT_STDIO = 0, /* Spawn process, pipe stdin/stdout   */
+    NEURONOS_MCP_TRANSPORT_HTTP,      /* Streamable HTTP (future)           */
+} neuronos_mcp_transport_t;
+
+/* Configuration for a single MCP server connection */
+typedef struct {
+    const char * name;                  /* Human-readable server name       */
+    neuronos_mcp_transport_t transport; /* STDIO or HTTP                    */
+    const char * command;               /* STDIO: program to execute        */
+    const char ** args;                 /* STDIO: program arguments         */
+    int n_args;                         /* Number of arguments              */
+    const char * url;                   /* HTTP: server URL (future)        */
+    const char ** env;                  /* Env vars ("KEY=VALUE" pairs)     */
+    int n_env;                          /* Number of env vars               */
+} neuronos_mcp_server_config_t;
+
+/* Create an MCP client instance */
+neuronos_mcp_client_t * neuronos_mcp_client_create(void);
+
+/* Add an MCP server config. Returns 0 on success, -1 on error. */
+int neuronos_mcp_client_add_server(neuronos_mcp_client_t * client,
+                                   const neuronos_mcp_server_config_t * config);
+
+/* Connect to all configured servers (fork+exec, initialize handshake).
+ * Returns 0 on success, negative on total failure.
+ * Individual server failures are logged but don't block others. */
+int neuronos_mcp_client_connect(neuronos_mcp_client_t * client);
+
+/* Get total number of discovered tools across all connected servers */
+int neuronos_mcp_client_tool_count(const neuronos_mcp_client_t * client);
+
+/* Register all discovered MCP tools into a tool registry.
+ * Creates wrapper functions that bridge tool_registry → MCP server calls.
+ * Returns number of tools registered, or negative on error. */
+int neuronos_mcp_client_register_tools(neuronos_mcp_client_t * client,
+                                       neuronos_tool_registry_t * registry);
+
+/* Call a specific MCP tool by name. Returns JSON result string.
+ * Caller must free the returned string with neuronos_free(). */
+char * neuronos_mcp_client_call_tool(neuronos_mcp_client_t * client,
+                                     const char * tool_name,
+                                     const char * args_json);
+
+/* Load MCP server configs from a JSON file.
+ * Format: { "mcpServers": { "name": { "command": "...", "args": [...] } } }
+ * Compatible with Claude Desktop / VS Code MCP config format.
+ * Returns number of servers loaded, or negative on error. */
+int neuronos_mcp_client_load_config(neuronos_mcp_client_t * client,
+                                    const char * config_path);
+
+/* Disconnect all servers and free client resources */
+void neuronos_mcp_client_free(neuronos_mcp_client_t * client);
 
 #ifdef __cplusplus
 }

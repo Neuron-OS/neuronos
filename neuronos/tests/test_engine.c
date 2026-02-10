@@ -69,7 +69,7 @@ static void test_engine_init(void) {
     /* Verify version */
     const char * ver = neuronos_version();
     ASSERT(ver != NULL, "version is NULL");
-    ASSERT(strcmp(ver, "0.7.0") == 0, "version mismatch");
+    ASSERT(strcmp(ver, NEURONOS_VERSION_STRING) == 0, "version mismatch");
 
     /* Init engine */
     neuronos_engine_params_t params = {

@@ -131,7 +131,19 @@ neuronos_model_t * neuronos_model_load(neuronos_engine_t * engine, neuronos_mode
     }
 
     /* --- Create context --- */
-    int ctx_size = params.context_size > 0 ? params.context_size : 2048;
+    /* Auto-detect optimal context size:
+     * - If user provides context_size > 0, use that.
+     * - If 0 (auto): use min(n_ctx_train, 8192) as sweet spot.
+     *   Models like Falcon3-10B support 32768 but 8192 is practical
+     *   for edge devices with limited RAM. User can always override. */
+    int n_ctx_train = (int)llama_n_ctx_train(model->llama_model);
+    int ctx_size;
+    if (params.context_size > 0) {
+        ctx_size = params.context_size;
+    } else {
+        ctx_size = n_ctx_train < 8192 ? n_ctx_train : 8192;
+        if (ctx_size < 512) ctx_size = 512;
+    }
     model->context_size = ctx_size;
 
     struct llama_context_params cparams = llama_context_default_params();
@@ -187,6 +199,10 @@ neuronos_model_info_t neuronos_model_info(const neuronos_model_t * model) {
     info.n_embd = llama_n_embd(model->llama_model);
 
     return info;
+}
+
+int neuronos_model_context_size(const neuronos_model_t * model) {
+    return model ? model->context_size : 0;
 }
 
 /* ============================================================

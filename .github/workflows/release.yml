@@ -1,0 +1,191 @@
+##
+## NeuronOS — Release Build & Publish
+##
+## Triggered by pushing a tag like v0.8.0
+## Builds for x86_64 and ARM64, creates release tarballs,
+## and publishes them as a GitHub Release.
+##
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.8.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # ═══════════════════════════════════════════════════════
+  # Build matrix: Linux x86_64 + ARM64
+  # ═══════════════════════════════════════════════════════
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-x86_64
+            compiler_c: clang
+            compiler_cxx: clang++
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            name: linux-arm64
+            compiler_c: gcc
+            compiler_cxx: g++
+
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake bc curl
+
+      - name: Install clang (x86_64 only)
+        if: matrix.arch == 'x86_64'
+        run: sudo apt-get install -y clang
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            # Extract from tag: v0.8.0 -> 0.8.0
+            TAG="${GITHUB_REF_NAME}"
+            echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build (BitNet + NeuronOS)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_C_COMPILER=${{ matrix.compiler_c }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler_cxx }} \
+            -DBITNET_X86_TL2=OFF
+          cmake --build build -j$(nproc)
+
+      - name: Run tests (HAL + Memory)
+        run: |
+          export LD_LIBRARY_PATH=$PWD/build/3rdparty/llama.cpp/src:$PWD/build/3rdparty/llama.cpp/ggml/src
+          ./build/bin/test_hal
+          ./build/bin/test_memory
+
+      - name: Package release
+        run: |
+          chmod +x scripts/package-release.sh
+          ./scripts/package-release.sh "${{ steps.version.outputs.version }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neuronos-v${{ steps.version.outputs.version }}-${{ matrix.name }}
+          path: neuronos-v${{ steps.version.outputs.version }}-${{ matrix.name }}.tar.gz
+          retention-days: 5
+
+  # ═══════════════════════════════════════════════════════
+  # Publish GitHub Release
+  # ═══════════════════════════════════════════════════════
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            TAG="${GITHUB_REF_NAME}"
+            echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f -ls
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > /tmp/release-notes.md << 'NOTES_EOF'
+          ## NeuronOS v$VERSION
+
+          Universal AI agent engine for edge devices — "The Android of AI"
+
+          ### What's in this release
+
+          - **neuronos-cli**: Complete AI agent with ReAct loop, 12 tools, persistent memory
+          - **MCP Server**: JSON-RPC 2.0 over STDIO (compatible with Claude Desktop, VS Code, etc.)
+          - **MCP Client**: Connect to 10,000+ MCP servers from the ecosystem
+          - **HTTP Server**: OpenAI-compatible API endpoint
+          - **Memory**: SQLite + FTS5 persistent MemGPT 3-tier memory
+          - **BitNet**: Native 1.58-bit ternary model support (2B, 7B, 10B)
+
+          ### Quick Install
+
+          ```bash
+          curl -sSL https://raw.githubusercontent.com/Neuron-OS/neuronos/main/scripts/install.sh | bash
+          ```
+
+          ### Manual Install
+
+          1. Download the tarball for your platform below
+          2. Extract: `tar xzf neuronos-v*.tar.gz`
+          3. Run: `./neuronos-v*/bin/neuronos model.gguf run "Hello"`
+
+          ### Download a model
+
+          ```bash
+          curl -L -o model.gguf \
+            https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf
+          ```
+
+          ### Supported platforms
+
+          | Platform | Architecture | Status |
+          |----------|-------------|--------|
+          | Linux | x86_64 (AVX2/AVX-VNNI) | ✅ |
+          | Linux | ARM64 (NEON) | ✅ |
+          | macOS | ARM64 (Apple Silicon) | 🔜 |
+          | macOS | x86_64 | 🔜 |
+          NOTES_EOF
+
+          # Replace version in notes
+          sed -i "s/\$VERSION/${VERSION}/g" /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: NeuronOS v${{ steps.version.outputs.version }}
+          body_path: /tmp/release-notes.md
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/**/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

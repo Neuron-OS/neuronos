@@ -53,12 +53,92 @@ static const char DEFAULT_SYSTEM_PROMPT_TEMPLATE[] =
     "- Give a final answer when you have enough information.\n"
     "- Respond ONLY with valid JSON, no other text.\n";
 
+/* ---- Model-size-aware system prompt templates ---- */
+
+/* Small models (<=3B params): ultra-concise, explicit examples */
+static const char SYSTEM_PROMPT_SMALL[] =
+    "You are an AI assistant with tools. Respond with JSON ONLY.\n\n"
+    "FORMAT 1 - Use a tool:\n"
+    "{\"thought\": \"I need to check...\", \"action\": \"tool_name\", \"args\": {\"key\": \"val\"}}\n\n"
+    "FORMAT 2 - Final answer:\n"
+    "{\"thought\": \"I know the answer\", \"answer\": \"my answer\"}\n\n"
+    "%s\n"
+    "RULES: Think step by step. Use tools when needed. Answer when ready. JSON only.\n";
+
+/* Large models (>=7B params): detailed instructions */
+static const char SYSTEM_PROMPT_LARGE[] =
+    "You are NeuronOS, an intelligent AI assistant running locally on the user's device.\n"
+    "You have access to tools and persistent memory. Respond with exactly one JSON object.\n\n"
+    "## To use a tool:\n"
+    "{\"thought\": \"step-by-step reasoning about what to do\", \"action\": \"tool_name\", "
+    "\"args\": {\"param\": \"value\"}}\n\n"
+    "## To provide your final answer:\n"
+    "{\"thought\": \"reasoning about why you have enough information\", "
+    "\"answer\": \"your comprehensive answer\"}\n\n"
+    "## Available Tools\n"
+    "%s\n"
+    "## Guidelines\n"
+    "- Reason carefully before each action.\n"
+    "- Use tools to gather information -- do not guess.\n"
+    "- If a tool errors, try a different approach.\n"
+    "- Give a final answer when you have sufficient information.\n"
+    "- Be thorough but concise in your answers.\n"
+    "- Respond with valid JSON ONLY, no other text.\n";
+
+/* ---- Token estimation ---- */
+static int estimate_tokens(const char * text) {
+    /* Rough estimate: ~3.5 chars per token for mixed English/JSON text */
+    return text ? (int)(strlen(text) * 10 / 35) : 0;
+}
+
+/* ---- Step history compaction ---- */
+
+/*
+ * Build a compact summary of agent steps [from..to).
+ * Extracts key action/observation pairs in abbreviated form.
+ * Returns newly allocated string. Caller must free.
+ */
+static char * compact_step_summary(const char ** step_actions, const char ** step_observations,
+                                   int from, int to) {
+    size_t cap = 256;
+    char * summary = malloc(cap);
+    if (!summary) return NULL;
+
+    size_t len = 0;
+    len += (size_t)snprintf(summary + len, cap - len, "[Earlier steps: ");
+
+    for (int i = from; i < to; i++) {
+        const char * act = step_actions[i] ? step_actions[i] : "unknown";
+        const char * obs = step_observations[i] ? step_observations[i] : "";
+        int obs_len = (int)strlen(obs);
+
+        /* Grow buffer if needed */
+        size_t need = strlen(act) + 80;
+        while (len + need > cap) { cap *= 2; summary = realloc(summary, cap); }
+
+        /* Truncate long observations in the summary */
+        if (obs_len > 80) {
+            len += (size_t)snprintf(summary + len, cap - len,
+                "Used %s -> %.80s... ", act, obs);
+        } else {
+            len += (size_t)snprintf(summary + len, cap - len,
+                "Used %s -> %s. ", act, obs);
+        }
+    }
+
+    while (len + 2 > cap) { cap *= 2; summary = realloc(summary, cap); }
+    len += (size_t)snprintf(summary + len, cap - len, "]");
+    return summary;
+}
+
 /* ---- Internal agent struct ---- */
 struct neuronos_agent {
     neuronos_model_t * model;
     neuronos_tool_registry_t * tools;
     neuronos_agent_params_t params;
     char * system_prompt;
+    neuronos_memory_t * memory;   /* optional persistent memory (not owned) */
+    int64_t session_id;           /* current recall memory session */
 };
 
 /* ---- Helpers ---- */
@@ -169,10 +249,13 @@ static char * json_extract_object(const char * json, const char * key) {
  * Falls back to plain text formatting if chat template is unavailable.
  */
 static char * build_prompt(const neuronos_agent_t * agent, const char * user_input, const char ** step_outputs,
-                           const char ** step_actions, const char ** step_observations, int n_steps) {
-    /* Count messages: system + user + 2 per completed step (assistant + observation) */
+                           const char ** step_actions, const char ** step_observations,
+                           int first_step, int n_steps, const char * context_summary) {
+    /* Count messages: system + user + (optional summary) + 2 per active step */
     size_t n_msgs = 2; /* system + user */
-    for (int i = 0; i < n_steps; i++) {
+    if (context_summary)
+        n_msgs++; /* compacted context summary */
+    for (int i = first_step; i < n_steps; i++) {
         if (step_outputs[i])
             n_msgs++;
         if (step_observations[i])
@@ -180,7 +263,8 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
     }
 
     neuronos_chat_msg_t * msgs = calloc(n_msgs, sizeof(neuronos_chat_msg_t));
-    char ** obs_bufs = calloc((size_t)n_steps, sizeof(char *)); /* owned observation strings */
+    int active_count = n_steps - first_step;
+    char ** obs_bufs = calloc((size_t)(active_count > 0 ? active_count : 1), sizeof(char *));
     if (!msgs || !obs_bufs) {
         free(msgs);
         free(obs_bufs);
@@ -196,7 +280,15 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
     msgs[idx].content = user_input;
     idx++;
 
-    for (int i = 0; i < n_steps; i++) {
+    /* Inject compacted context summary if present */
+    if (context_summary) {
+        msgs[idx].role = "user";
+        msgs[idx].content = context_summary;
+        idx++;
+    }
+
+    for (int i = first_step; i < n_steps; i++) {
+        int obs_idx = i - first_step;
         if (step_outputs[i]) {
             msgs[idx].role = "assistant";
             msgs[idx].content = step_outputs[i];
@@ -206,10 +298,10 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
             /* Build observation string: "Observation from <tool>: <result>" */
             const char * tool = step_actions[i] ? step_actions[i] : "tool";
             size_t obs_len = strlen("Observation from : ") + strlen(tool) + strlen(step_observations[i]) + 1;
-            obs_bufs[i] = malloc(obs_len);
-            snprintf(obs_bufs[i], obs_len, "Observation from %s: %s", tool, step_observations[i]);
+            obs_bufs[obs_idx] = malloc(obs_len);
+            snprintf(obs_bufs[obs_idx], obs_len, "Observation from %s: %s", tool, step_observations[i]);
             msgs[idx].role = "user";
-            msgs[idx].content = obs_bufs[i];
+            msgs[idx].content = obs_bufs[obs_idx];
             idx++;
         }
     }
@@ -219,7 +311,7 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
     neuronos_status_t st = neuronos_chat_format(agent->model, NULL, msgs, idx, true, &formatted);
 
     /* Free temporary observation buffers */
-    for (int i = 0; i < n_steps; i++) {
+    for (int i = 0; i < active_count; i++) {
         free(obs_bufs[i]);
     }
     free(obs_bufs);
@@ -231,7 +323,9 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
 
     /* Fallback: plain text (legacy format) */
     size_t total = strlen(agent->system_prompt) + strlen(user_input) + 256;
-    for (int i = 0; i < n_steps; i++) {
+    if (context_summary)
+        total += strlen(context_summary) + 32;
+    for (int i = first_step; i < n_steps; i++) {
         if (step_outputs[i])
             total += strlen(step_outputs[i]) + 32;
         if (step_observations[i])
@@ -246,7 +340,11 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
     len += (size_t)sprintf(prompt + len, "%s\n", agent->system_prompt);
     len += (size_t)sprintf(prompt + len, "User: %s\n\n", user_input);
 
-    for (int i = 0; i < n_steps; i++) {
+    if (context_summary) {
+        len += (size_t)sprintf(prompt + len, "%s\n\n", context_summary);
+    }
+
+    for (int i = first_step; i < n_steps; i++) {
         if (step_outputs[i]) {
             len += (size_t)sprintf(prompt + len, "Assistant: %s\n", step_outputs[i]);
         }
@@ -280,10 +378,27 @@ neuronos_agent_t * neuronos_agent_create(neuronos_model_t * model, neuronos_tool
     agent->params.max_steps = params.max_steps > 0 ? params.max_steps : 10;
     agent->params.max_tokens_per_step = params.max_tokens_per_step > 0 ? params.max_tokens_per_step : 512;
     agent->params.temperature = params.temperature > 0.0f ? params.temperature : 0.3f;
-    agent->params.context_budget = params.context_budget > 0 ? params.context_budget : 1536;
+    /* Context budget: use 80% of model context, minimum 1536 */
+    int ctx_cap = neuronos_model_context_size(model);
+    int auto_budget = ctx_cap > 0 ? (int)(ctx_cap * 0.80f) : 1536;
+    if (auto_budget < 1536) auto_budget = 1536;
+    agent->params.context_budget = params.context_budget > 0 ? params.context_budget : auto_budget;
     agent->params.verbose = params.verbose;
+    agent->memory = NULL;
+    agent->session_id = 1;
 
-    /* Build default system prompt with tool descriptions */
+    /* Select system prompt based on model size */
+    neuronos_model_info_t minfo = neuronos_model_info(model);
+    const char * prompt_template;
+    if (minfo.n_params > 0 && minfo.n_params <= 4000000000LL) {
+        prompt_template = SYSTEM_PROMPT_SMALL;
+    } else if (minfo.n_params > 4000000000LL) {
+        prompt_template = SYSTEM_PROMPT_LARGE;
+    } else {
+        prompt_template = DEFAULT_SYSTEM_PROMPT_TEMPLATE;
+    }
+
+    /* Build system prompt with tool descriptions */
     char * tool_desc;
     if (tools) {
         tool_desc = neuronos_tool_prompt_description(tools);
@@ -291,10 +406,16 @@ neuronos_agent_t * neuronos_agent_create(neuronos_model_t * model, neuronos_tool
         tool_desc = strdup("No tools available.\n");
     }
 
-    size_t prompt_size = strlen(DEFAULT_SYSTEM_PROMPT_TEMPLATE) + strlen(tool_desc) + 64;
+    size_t prompt_size = strlen(prompt_template) + strlen(tool_desc) + 64;
     agent->system_prompt = malloc(prompt_size);
-    snprintf(agent->system_prompt, prompt_size, DEFAULT_SYSTEM_PROMPT_TEMPLATE, tool_desc);
+    snprintf(agent->system_prompt, prompt_size, prompt_template, tool_desc);
     free(tool_desc);
+
+    if (params.verbose) {
+        const char * size_label = minfo.n_params <= 4000000000LL ? "small" : "large";
+        fprintf(stderr, "[neuronos] Agent created: %s prompt template (model %lldM params, ctx_budget=%d)\n",
+                size_label, (long long)(minfo.n_params / 1000000), agent->params.context_budget);
+    }
 
     return agent;
 }
@@ -313,6 +434,49 @@ void neuronos_agent_set_system_prompt(neuronos_agent_t * agent, const char * sys
     agent->system_prompt = strdup(system_prompt);
 }
 
+void neuronos_agent_set_memory(neuronos_agent_t * agent, neuronos_memory_t * mem) {
+    if (!agent) return;
+    agent->memory = mem;
+    if (mem) {
+        agent->session_id = neuronos_memory_session_create(mem);
+    }
+}
+
+/*
+ * Build enriched system prompt with core memory blocks and A/R stats.
+ * Called when memory is attached and before each agent run.
+ */
+static char * build_memory_enriched_prompt(const neuronos_agent_t * agent, const char * base_prompt) {
+    if (!agent->memory) return strdup(base_prompt);
+
+    char * core_dump = neuronos_memory_core_dump(agent->memory);
+    int recall_msgs = 0, recall_tokens = 0;
+    int archival_facts = 0;
+
+    neuronos_memory_recall_stats(agent->memory, agent->session_id, &recall_msgs, &recall_tokens);
+    neuronos_memory_archival_stats(agent->memory, &archival_facts);
+
+    /* Build enriched prompt */
+    size_t len = strlen(base_prompt) + (core_dump ? strlen(core_dump) : 0) + 512;
+    char * enriched = malloc(len);
+    snprintf(enriched, len,
+        "%s\n"
+        "### Core Memory ###\n"
+        "%s"
+        "\n"
+        "### Memory Stats ###\n"
+        "Recall memory: %d messages (%d tokens) in this session.\n"
+        "Archival memory: %d facts stored.\n"
+        "You can use memory_store to save important facts, memory_search to find them, "
+        "and memory_core_update to update your core memory blocks.\n",
+        base_prompt,
+        core_dump ? core_dump : "(empty)\n",
+        recall_msgs, recall_tokens, archival_facts);
+
+    free(core_dump);
+    return enriched;
+}
+
 /* ============================================================
  * AGENT RUN — The ReAct Loop
  * ============================================================ */
@@ -325,6 +489,17 @@ neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char 
     if (!agent || !user_input) {
         result.status = NEURONOS_ERROR_INVALID_PARAM;
         return result;
+    }
+
+    /* If memory is attached, enrich system prompt with core blocks + stats */
+    char * original_prompt = NULL;
+    if (agent->memory) {
+        original_prompt = agent->system_prompt; /* save original */
+        agent->system_prompt = build_memory_enriched_prompt(agent, original_prompt);
+
+        /* Log user input to recall memory (rough token estimate: chars/4) */
+        neuronos_memory_recall_add(agent->memory, agent->session_id,
+                                   "user", user_input, (int)(strlen(user_input) / 4));
     }
 
     int max_steps = agent->params.max_steps;
@@ -342,6 +517,11 @@ neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char 
         return result;
     }
 
+    /* Context compaction state */
+    int first_active_step = 0;     /* first step to include in prompt */
+    char * context_summary = NULL; /* summary of compacted earlier steps */
+    int ctx_capacity = neuronos_model_context_size(agent->model);
+    int gen_budget = agent->params.max_tokens_per_step;
     int steps_taken = 0;
 
     for (int step = 0; step < max_steps; step++) {
@@ -349,12 +529,76 @@ neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char 
             fprintf(stderr, "\n[neuronos] ── Step %d/%d ──\n", step + 1, max_steps);
         }
 
+        /* ---- Context compaction check ---- */
+        if (ctx_capacity > 0 && step >= 3) {
+            /* Estimate total prompt tokens */
+            int est_tokens = estimate_tokens(agent->system_prompt) + estimate_tokens(user_input);
+            if (context_summary) est_tokens += estimate_tokens(context_summary);
+            for (int i = first_active_step; i < step; i++) {
+                est_tokens += estimate_tokens(step_outputs[i]);
+                est_tokens += estimate_tokens(step_observations[i]);
+                est_tokens += 20; /* overhead per step (role tags, etc.) */
+            }
+
+            float usage_ratio = (float)(est_tokens + gen_budget) / (float)ctx_capacity;
+
+            if (usage_ratio > 0.80f) {
+                /* Need to compact: keep last 2 steps, summarize the rest */
+                int keep_last = 2;
+                int compact_end = step - keep_last;
+                if (compact_end > first_active_step) {
+                    if (agent->params.verbose) {
+                        fprintf(stderr, "[neuronos] Context compaction: %.0f%% used (%d/%d tokens), "
+                                "compacting steps %d-%d\n",
+                                usage_ratio * 100.0f, est_tokens, ctx_capacity,
+                                first_active_step + 1, compact_end);
+                    }
+
+                    /* Build new summary, merge with existing if present */
+                    char * new_summary = compact_step_summary(
+                        step_actions, step_observations, first_active_step, compact_end);
+
+                    if (context_summary && new_summary) {
+                        /* Merge old + new summary */
+                        size_t merged_len = strlen(context_summary) + strlen(new_summary) + 4;
+                        char * merged = malloc(merged_len);
+                        snprintf(merged, merged_len, "%s %s", context_summary, new_summary);
+                        free(context_summary);
+                        free(new_summary);
+                        context_summary = merged;
+                    } else if (new_summary) {
+                        context_summary = new_summary;
+                    }
+
+                    /* Store compacted steps to recall memory if available */
+                    if (agent->memory) {
+                        for (int i = first_active_step; i < compact_end; i++) {
+                            if (step_outputs[i]) {
+                                neuronos_memory_recall_add(agent->memory, agent->session_id,
+                                    "assistant", step_outputs[i],
+                                    estimate_tokens(step_outputs[i]));
+                            }
+                        }
+                    }
+
+                    first_active_step = compact_end;
+                }
+            }
+        }
+
         /* Build the prompt with conversation history */
-        char * prompt = build_prompt(agent, user_input, step_outputs, step_actions, step_observations, step);
+        char * prompt = build_prompt(agent, user_input, step_outputs, step_actions,
+                                     step_observations, first_active_step, step,
+                                     context_summary);
 
         if (!prompt) {
             result.status = NEURONOS_ERROR_GENERATE;
             break;
+        }
+
+        if (agent->params.verbose) {
+            fprintf(stderr, "[neuronos] Prompt: %zu chars (~%d tokens), ctx_cap=%d\n",
+                    strlen(prompt), estimate_tokens(prompt), ctx_capacity);
         }
 
         /* Generate with grammar constraint */
@@ -462,6 +706,18 @@ neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char 
     result.total_ms = get_time_ms() - t_start;
 
 cleanup:
+    /* Log final answer to recall memory */
+    if (agent->memory && result.text) {
+        neuronos_memory_recall_add(agent->memory, agent->session_id,
+                                   "assistant", result.text, (int)(strlen(result.text) / 4));
+    }
+
+    /* Restore original system prompt (enriched one was temporary) */
+    if (original_prompt) {
+        free(agent->system_prompt);
+        agent->system_prompt = original_prompt;
+    }
+
     /* Free history */
     for (int i = 0; i < max_steps; i++) {
         free((void *)step_outputs[i]);
@@ -471,6 +727,7 @@ cleanup:
     free(step_outputs);
     free(step_actions);
     free(step_observations);
+    free(context_summary);
 
     return result;
 }
@@ -480,6 +737,37 @@ void neuronos_agent_result_free(neuronos_agent_result_t * result) {
         return;
     free(result->text);
     result->text = NULL;
+}
+
+/* ============================================================
+ * CONTEXT API: Token counting and usage tracking
+ * ============================================================ */
+
+int neuronos_context_token_count(const neuronos_agent_t * agent) {
+    if (!agent || !agent->model) return 0;
+    /* Returns estimated tokens used by system prompt + core memory.
+     * During agent_run, actual token count is tracked per-step internally. */
+    return estimate_tokens(agent->system_prompt);
+}
+
+int neuronos_context_capacity(const neuronos_agent_t * agent) {
+    if (!agent || !agent->model) return 0;
+    return neuronos_model_context_size(agent->model);
+}
+
+float neuronos_context_usage_ratio(const neuronos_agent_t * agent) {
+    int cap = neuronos_context_capacity(agent);
+    if (cap <= 0) return 0.0f;
+    return (float)neuronos_context_token_count(agent) / (float)cap;
+}
+
+int neuronos_context_compact(neuronos_agent_t * agent) {
+    /* Context compaction is performed automatically during agent_run()
+     * when the prompt exceeds 80% of context capacity.
+     * This function is a no-op outside of an active agent run.
+     * Returns 0 (no tokens freed outside of a run). */
+    (void)agent;
+    return 0;
 }
 
 /* ============================================================
@@ -503,7 +791,7 @@ char * neuronos_quick_agent(const char * model_path, const char * prompt, int ma
     /* Load model */
     neuronos_model_params_t mparams = {
         .model_path = model_path,
-        .context_size = 2048,
+        .context_size = 0, /* auto-detect optimal context */
         .use_mmap = true,
     };
     neuronos_model_t * model = neuronos_model_load(engine, mparams);

@@ -48,3 +48,4 @@ logs/cuda_*.run
 *.run
 cuda_*.run
 *.run
+neuronos-v*.tar.gz
