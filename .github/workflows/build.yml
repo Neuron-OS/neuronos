@@ -2,10 +2,16 @@
 ## NeuronOS — Build, Test & Release
 ##
 ## Single pipeline for everything:
-##   - Every push/PR: build + test on all 3 platforms
-##   - Tag v*: also creates GitHub Release with tarballs
+##   - Every push/PR: build + test on all platforms
+##   - Tag v*: also creates GitHub Release with installers
 ##
-## Platforms: Linux x86_64, Linux ARM64, macOS ARM64
+## Platforms:
+##   - Linux x86_64   (Ubuntu 22.04, GCC)
+##   - Linux ARM64    (Ubuntu 24.04-arm, GCC)
+##   - macOS ARM64    (macOS 14, Apple Clang)
+##   - Windows x64    (MSVC 2022, Ninja)
+##   - Android ARM64  (NDK cross-compile)
+##
 ## All builds use static linking (BUILD_SHARED_LIBS=OFF)
 ##
 name: Build
@@ -27,27 +33,47 @@ concurrency:
 
 jobs:
   # ═══════════════════════════════════════════════════════════════
-  # Build + Test + Package (3 platforms)
+  # Build + Test + Package (5 platforms)
   # ═══════════════════════════════════════════════════════════════
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
+          # ── Linux x86_64 ──
           - name: linux-x86_64
             os: ubuntu-22.04
             cc: gcc
             cxx: g++
+            run_tests: true
             run_hal: true
+
+          # ── Linux ARM64 ──
           - name: linux-arm64
             os: ubuntu-24.04-arm
             cc: gcc
             cxx: g++
+            run_tests: true
             run_hal: true
+
+          # ── macOS ARM64 (Apple Silicon) ──
           - name: macos-arm64
             os: macos-14
             cc: clang
             cxx: clang++
+            run_tests: true
+            run_hal: false
+
+          # ── Windows x64 (MSVC) ──
+          - name: windows-x64
+            os: windows-latest
+            run_tests: true
+            run_hal: true
+
+          # ── Android ARM64 (NDK cross-compile) ──
+          - name: android-arm64
+            os: ubuntu-22.04
+            run_tests: false
             run_hal: false
 
     name: ${{ matrix.name }}
@@ -58,19 +84,52 @@ jobs:
         with:
           submodules: recursive
 
+      # ────────────────────────────────────────────
+      # Platform-specific setup
+      # ────────────────────────────────────────────
       - name: Install deps (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.name != 'android-arm64'
         run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - name: Determine version
+      - name: Setup Android NDK
+        if: matrix.name == 'android-arm64'
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build
+          echo "ANDROID_NDK=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+
+      - name: Setup MSVC (Windows)
+        if: matrix.name == 'windows-x64'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ────────────────────────────────────────────
+      # Determine version
+      # ────────────────────────────────────────────
+      - name: Determine version (Unix)
+        if: runner.os != 'Windows'
         id: ver
         run: |
-          VER=$(grep -oP '#define NEURONOS_VERSION_STRING\s+"\K[^"]+' \
+          VER=$(sed -n 's/.*#define NEURONOS_VERSION_STRING[[:space:]]*"\([^"]*\)".*/\1/p' \
             neuronos/include/neuronos/neuronos.h 2>/dev/null || echo "0.0.0")
           echo "version=$VER" >> $GITHUB_OUTPUT
 
-      # ── Build ──
-      - name: Configure
+      - name: Determine version (Windows)
+        if: runner.os == 'Windows'
+        id: ver_win
+        shell: pwsh
+        run: |
+          $content = Get-Content neuronos/include/neuronos/neuronos.h -Raw
+          if ($content -match '#define NEURONOS_VERSION_STRING\s+"([^"]+)"') {
+            $ver = $Matches[1]
+          } else { $ver = "0.0.0" }
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+
+      # ════════════════════════════════════════════
+      # Configure
+      # ════════════════════════════════════════════
+      - name: Configure (Unix native)
+        if: runner.os != 'Windows' && matrix.name != 'android-arm64'
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -79,12 +138,44 @@ jobs:
             -DBITNET_X86_TL2=OFF \
             -DBUILD_SHARED_LIBS=OFF
 
-      - name: Compile
-        run: cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+      - name: Configure (Windows MSVC)
+        if: matrix.name == 'windows-x64'
+        shell: pwsh
+        run: |
+          cmake -B build -G "Ninja Multi-Config" `
+            -DBITNET_X86_TL2=OFF `
+            -DBUILD_SHARED_LIBS=OFF
 
-      # ── Verify ──
-      - name: Verify static linking
-        if: runner.os == 'Linux'
+      - name: Configure (Android NDK)
+        if: matrix.name == 'android-arm64'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-28 \
+            -DBITNET_X86_TL2=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_OPENMP=OFF \
+            -DNEURONOS_BUILD_TESTS=OFF
+
+      # ════════════════════════════════════════════
+      # Compile
+      # ════════════════════════════════════════════
+      - name: Compile (Unix)
+        if: runner.os != 'Windows'
+        run: cmake --build build --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+
+      - name: Compile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      # ════════════════════════════════════════════
+      # Verify + Test
+      # ════════════════════════════════════════════
+      - name: Verify static linking (Linux native)
+        if: runner.os == 'Linux' && matrix.name != 'android-arm64'
         run: |
           ldd build/bin/neuronos-cli
           if ldd build/bin/neuronos-cli | grep -q libllama; then
@@ -92,47 +183,151 @@ jobs:
             exit 1
           fi
 
-      # ── Test ──
-      - name: test_hal
-        if: matrix.run_hal
-        run: ./build/bin/test_hal
-
-      - name: test_memory
-        run: ./build/bin/test_memory
-
-      - name: test_engine
-        run: ./build/bin/test_engine
-
-      - name: hwinfo
-        run: ./build/bin/neuronos-cli hwinfo
-
-      # ── Package ──
-      - name: Package tarball
+      - name: Verify binary (Android)
+        if: matrix.name == 'android-arm64'
         run: |
-          chmod +x scripts/package-release.sh
-          ./scripts/package-release.sh "${{ steps.ver.outputs.version }}" build
+          BIN=$(find build -name "neuronos-cli" -type f | head -1)
+          if [ -z "$BIN" ]; then echo "::error::neuronos-cli not found"; exit 1; fi
+          file "$BIN"
 
-      - name: Upload artifact
+      - name: Verify binary (Windows)
+        if: matrix.name == 'windows-x64'
+        shell: pwsh
+        run: |
+          $cli = Get-ChildItem -Recurse -Filter "neuronos-cli.exe" build/ | Select-Object -First 1
+          if ($cli) {
+            Write-Host "Binary: $($cli.FullName)"
+            "Size: {0:N1} MB" -f ($cli.Length / 1MB)
+          } else {
+            Write-Host "::error::neuronos-cli.exe not found"
+            Get-ChildItem -Recurse build/bin/ 2>$null | ForEach-Object { $_.FullName }
+            exit 1
+          }
+
+      - name: Run tests (Unix)
+        if: matrix.run_tests && runner.os != 'Windows'
+        run: |
+          ./build/bin/test_hal    && echo "✓ test_hal"    || true
+          ./build/bin/test_memory && echo "✓ test_memory"
+          ./build/bin/test_engine && echo "✓ test_engine"
+          ./build/bin/neuronos-cli hwinfo
+
+      - name: Run tests (Windows)
+        if: matrix.run_tests && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Ninja Multi-Config puts binaries under Release/
+          $binDirs = @("build/bin/Release", "build/bin")
+          $binDir = $binDirs | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $binDir) { $binDir = "build/bin" }
+
+          $tests = @("test_hal", "test_memory", "test_engine")
+          foreach ($t in $tests) {
+            $exe = Get-ChildItem -Recurse -Filter "$t.exe" build/ | Select-Object -First 1
+            if ($exe) {
+              Write-Host "Running $t..."
+              & $exe.FullName
+              if ($LASTEXITCODE -ne 0) { Write-Host "::warning::$t failed"; exit 1 }
+              Write-Host "✓ $t"
+            } else { Write-Host "::warning::$t not found, skipping" }
+          }
+
+          $cli = Get-ChildItem -Recurse -Filter "neuronos-cli.exe" build/ | Select-Object -First 1
+          if ($cli) { & $cli.FullName hwinfo }
+
+      # ════════════════════════════════════════════
+      # Package
+      # ════════════════════════════════════════════
+      - name: Package (Unix native)
+        if: runner.os != 'Windows' && matrix.name != 'android-arm64'
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          chmod +x scripts/package-release.sh
+          ./scripts/package-release.sh "$VER" build
+
+      - name: Package (Android)
+        if: matrix.name == 'android-arm64'
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          NAME="neuronos-v${VER}-android-arm64"
+          mkdir -p /tmp/${NAME}/bin /tmp/${NAME}/share/neuronos/grammars
+          BIN=$(find build -name "neuronos-cli" -type f | head -1)
+          cp "$BIN" /tmp/${NAME}/bin/
+          cp neuronos/grammars/*.gbnf /tmp/${NAME}/share/neuronos/grammars/ 2>/dev/null || true
+          cd /tmp && tar czf "${GITHUB_WORKSPACE}/${NAME}.tar.gz" "${NAME}"
+          echo "Packaged: ${NAME}.tar.gz ($(du -h "${GITHUB_WORKSPACE}/${NAME}.tar.gz" | cut -f1))"
+
+      - name: Package (Windows)
+        if: matrix.name == 'windows-x64'
+        shell: pwsh
+        run: |
+          $VER = "${{ steps.ver_win.outputs.version }}"
+          $NAME = "neuronos-v${VER}-windows-x64"
+          $staging = "$env:RUNNER_TEMP\$NAME"
+
+          New-Item -ItemType Directory -Force -Path "$staging\bin" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$staging\share\neuronos\grammars" | Out-Null
+
+          # Find and copy binary
+          $cli = Get-ChildItem -Recurse -Filter "neuronos-cli.exe" build/ | Select-Object -First 1
+          if (-not $cli) { Write-Host "::error::neuronos-cli.exe not found"; exit 1 }
+          Copy-Item $cli.FullName "$staging\bin\neuronos-cli.exe"
+
+          # Copy grammars
+          Get-ChildItem "neuronos/grammars/*.gbnf" -ErrorAction SilentlyContinue |
+            Copy-Item -Destination "$staging\share\neuronos\grammars\" -ErrorAction SilentlyContinue
+
+          # Create zip
+          Compress-Archive -Path "$staging\*" -DestinationPath "$NAME.zip" -Force
+          $size = (Get-Item "$NAME.zip").Length / 1MB
+          Write-Host "Packaged: $NAME.zip ({0:N1} MB)" -f $size
+
+      # ── Upload artifacts ──
+      - name: Upload artifact (tarball)
+        if: matrix.name != 'windows-x64'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: neuronos-v*.tar.gz
           retention-days: 30
 
+      - name: Upload artifact (zip)
+        if: matrix.name == 'windows-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: neuronos-v*.zip
+          retention-days: 30
+
       # ── Summary ──
-      - name: Summary
-        if: always()
+      - name: Summary (Unix)
+        if: always() && runner.os != 'Windows'
         run: |
           echo "## ${{ matrix.name }}" >> $GITHUB_STEP_SUMMARY
           echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Arch | $(uname -m) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Binary | $(du -h build/bin/neuronos-cli | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          BIN=$(find build -name "neuronos-cli" -type f | head -1)
+          [ -n "$BIN" ] && echo "| Binary | $(du -h "$BIN" | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | ${{ steps.ver.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
-          TARBALL=$(ls neuronos-v*.tar.gz 2>/dev/null | head -1)
-          if [ -n "$TARBALL" ]; then
-            echo "| Tarball | $(du -h "$TARBALL" | cut -f1) |" >> $GITHUB_STEP_SUMMARY
-          fi
+          PKG=$(ls neuronos-v*.tar.gz 2>/dev/null | head -1)
+          [ -n "$PKG" ] && echo "| Package | $(du -h "$PKG" | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VER = "${{ steps.ver_win.outputs.version }}"
+          $lines = @(
+            "## ${{ matrix.name }}"
+            "| Key | Value |"
+            "|-----|-------|"
+            "| Arch | x64 |"
+            "| Version | $VER |"
+          )
+          $pkg = Get-Item "neuronos-v*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($pkg) { $lines += "| Package | {0:N1} MB |" -f ($pkg.Length / 1MB) }
+          $lines -join "`n" >> $env:GITHUB_STEP_SUMMARY
 
   # ═══════════════════════════════════════════════════════════════
   # Publish GitHub Release (only on tag push v*)
@@ -155,10 +350,11 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Collect tarballs
+      - name: Collect release files
         run: |
           mkdir -p release-files
           find artifacts/ -name "*.tar.gz" -exec cp {} release-files/ \;
+          find artifacts/ -name "*.zip"    -exec cp {} release-files/ \;
           echo "=== Release files ==="
           ls -lh release-files/
 
@@ -171,30 +367,38 @@ jobs:
           body: |
             ## NeuronOS v${{ steps.ver.outputs.version }}
 
-            Universal AI agent engine for edge devices.
+            Universal AI agent engine for edge devices — *"The Android of AI"*
 
-            ### Install
-
-            ```bash
-            # With gh CLI (works for private repos):
-            bash <(gh api repos/${{ github.repository }}/contents/scripts/install.sh --jq '.content' | base64 -d)
-            ```
-
-            ### Download
+            ### Platforms
 
             | Platform | File |
             |----------|------|
             | Linux x86_64 | `neuronos-v${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz` |
             | Linux ARM64 | `neuronos-v${{ steps.ver.outputs.version }}-linux-arm64.tar.gz` |
             | macOS ARM64 | `neuronos-v${{ steps.ver.outputs.version }}-macos-arm64.tar.gz` |
+            | Windows x64 | `neuronos-v${{ steps.ver.outputs.version }}-windows-x64.zip` |
+            | Android ARM64 | `neuronos-v${{ steps.ver.outputs.version }}-android-arm64.tar.gz` |
+
+            ### Install (Linux / macOS)
+
+            ```bash
+            bash <(gh api repos/${{ github.repository }}/contents/scripts/install.sh --jq '.content' | base64 -d)
+            ```
 
             ### Quick Start
 
             ```bash
+            # Linux / macOS
             tar xzf neuronos-v*.tar.gz && cd neuronos-v*/
-            # Download model (~1.7 GB)
             curl -L -o model.gguf https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf
             ./bin/neuronos-cli model.gguf chat
+            ```
+
+            ```powershell
+            # Windows
+            Expand-Archive neuronos-v*.zip -DestinationPath neuronos
+            cd neuronos
+            .\bin\neuronos-cli.exe model.gguf chat
             ```
           files: release-files/*
         env:

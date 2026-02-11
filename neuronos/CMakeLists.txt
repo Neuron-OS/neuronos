@@ -1,11 +1,14 @@
 ##
-## NeuronOS — CMakeLists.txt  (v0.7.0)
+## NeuronOS — CMakeLists.txt  (v0.8.1)
 ##
 ## Builds the full NeuronOS Universal Agent Engine:
 ##   - HAL (Hardware Abstraction Layer)
 ##   - Engine (inference wrapper + HW detect + model selector + auto-tune)
+##   - Memory (SQLite+FTS5 persistent memory)
 ##   - Agent (tool registry + ReAct loop)
 ##   - Interface (HTTP server + MCP server)
+##
+## Supports: Linux (x86_64, ARM64), macOS (ARM64), Windows (x64), Android (ARM64)
 ##
 
 cmake_minimum_required(VERSION 3.14)
@@ -13,6 +16,14 @@ project(neuronos C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# ───── Cross-platform helpers ─────
+# libm is built into MSVC CRT, only needed on Unix
+if(NOT MSVC)
+    set(NEURONOS_LIBM m)
+else()
+    set(NEURONOS_LIBM "")
+endif()
 
 # ───── Paths ─────
 set(NEURONOS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -63,7 +74,13 @@ if(NEURONOS_STANDALONE)
 endif()
 target_link_libraries(neuronos_hal PUBLIC llama ggml)
 
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+# Compiler-specific warning and SIMD flags
+if(MSVC)
+    target_compile_options(neuronos_hal PRIVATE /W3)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|x86|x64")
+        target_compile_options(neuronos_hal PRIVATE /arch:AVX2)
+    endif()
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(neuronos_hal PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|x86")
@@ -99,9 +116,11 @@ if(NEURONOS_STANDALONE)
         ${LLAMA_BUILD_DIR}/ggml/src
     )
 endif()
-target_link_libraries(neuronos_engine PUBLIC llama ggml m)
+target_link_libraries(neuronos_engine PUBLIC llama ggml ${NEURONOS_LIBM})
 
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+if(MSVC)
+    target_compile_options(neuronos_engine PRIVATE /W3)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(neuronos_engine PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
@@ -135,16 +154,20 @@ target_compile_definitions(neuronos_memory PRIVATE
 )
 
 # Suppress warnings in SQLite amalgamation (3rd party code)
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+if(MSVC)
+    set_source_files_properties(${SQLITE_DIR}/sqlite3.c
+        PROPERTIES COMPILE_FLAGS "/w")
+    target_compile_options(neuronos_memory PRIVATE /W3)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     set_source_files_properties(${SQLITE_DIR}/sqlite3.c
         PROPERTIES COMPILE_FLAGS "-w")
     set_source_files_properties(src/memory/neuronos_memory.c
         PROPERTIES COMPILE_FLAGS "-Wall -Wextra -Wpedantic -Wno-unused-parameter")
 endif()
 
-# Link against pthreads and dl (required by SQLite on Linux)
+# Link against pthreads and dl (required by SQLite on Linux/macOS)
 find_package(Threads REQUIRED)
-target_link_libraries(neuronos_memory PUBLIC Threads::Threads ${CMAKE_DL_LIBS} m)
+target_link_libraries(neuronos_memory PUBLIC Threads::Threads ${CMAKE_DL_LIBS} ${NEURONOS_LIBM})
 
 # ═════════════════════════════════════════════════════════════
 # Layer 3: Agent — Tool registry + ReAct loop
@@ -160,7 +183,9 @@ target_include_directories(neuronos_agent
 )
 target_link_libraries(neuronos_agent PUBLIC neuronos_engine neuronos_memory)
 
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+if(MSVC)
+    target_compile_options(neuronos_agent PRIVATE /W3)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(neuronos_agent PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
@@ -180,7 +205,9 @@ target_include_directories(neuronos_interface
 )
 target_link_libraries(neuronos_interface PUBLIC neuronos_engine)
 
-if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+if(MSVC)
+    target_compile_options(neuronos_interface PRIVATE /W3)
+elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(neuronos_interface PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
@@ -193,7 +220,7 @@ option(NEURONOS_BUILD_TESTS "Build NeuronOS tests" ON)
 if(NEURONOS_BUILD_TESTS)
     # HAL test (existing)
     add_executable(test_hal tests/test_hal.c)
-    target_link_libraries(test_hal PRIVATE neuronos_hal m)
+    target_link_libraries(test_hal PRIVATE neuronos_hal ${NEURONOS_LIBM})
     target_include_directories(test_hal PRIVATE ${NEURONOS_INCLUDE_DIR})
 
     # Engine + Agent test
@@ -203,12 +230,12 @@ if(NEURONOS_BUILD_TESTS)
         ${LLAMA_SRC_DIR}/include
         ${LLAMA_SRC_DIR}/ggml/include
     )
-    target_link_libraries(test_engine PRIVATE neuronos_agent neuronos_interface neuronos_engine neuronos_hal m)
+    target_link_libraries(test_engine PRIVATE neuronos_agent neuronos_interface neuronos_engine neuronos_hal ${NEURONOS_LIBM})
 
     # Memory test (no model needed — pure SQLite)
     add_executable(test_memory tests/test_memory.c)
     target_include_directories(test_memory PRIVATE ${NEURONOS_INCLUDE_DIR})
-    target_link_libraries(test_memory PRIVATE neuronos_memory m)
+    target_link_libraries(test_memory PRIVATE neuronos_memory ${NEURONOS_LIBM})
 endif()
 
 # ═════════════════════════════════════════════════════════════
@@ -220,4 +247,9 @@ target_include_directories(neuronos-cli PRIVATE
     ${LLAMA_SRC_DIR}/include
     ${LLAMA_SRC_DIR}/ggml/include
 )
-target_link_libraries(neuronos-cli PRIVATE neuronos_agent neuronos_interface neuronos_engine neuronos_hal m)
+target_link_libraries(neuronos-cli PRIVATE neuronos_agent neuronos_interface neuronos_engine neuronos_hal ${NEURONOS_LIBM})
+
+# On Windows, link Winsock and WinHTTP for networking
+if(WIN32)
+    target_link_libraries(neuronos-cli PRIVATE ws2_32)
+endif()

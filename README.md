@@ -1,339 +1,260 @@
-# bitnet.cpp
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-![version](https://img.shields.io/badge/version-1.0-blue)
+<p align="center">
+  <h1 align="center">NeuronOS</h1>
+  <p align="center"><em>Universal AI Agent Engine for Edge Devices</em></p>
+  <p align="center"><strong>"The Android of AI"</strong> — Local AI agents on any device, no cloud required.</p>
+</p>
 
-[<img src="./assets/header_model_release.png" alt="BitNet Model on Hugging Face" width="800"/>](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T)
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/version-0.8.1-green" alt="Version 0.8.1">
+  <img src="https://img.shields.io/badge/C11-pure-blue" alt="C11">
+  <img src="https://img.shields.io/badge/platforms-5-orange" alt="5 Platforms">
+  <img src="https://img.shields.io/badge/tests-31%2F31_passing-brightgreen" alt="Tests: 31/31">
+</p>
 
-Try it out via this [demo](https://bitnet-demo.azurewebsites.net/), or build and run it on your own [CPU](https://github.com/microsoft/BitNet?tab=readme-ov-file#build-from-source) or [GPU](https://github.com/microsoft/BitNet/blob/main/gpu/README.md).
+---
 
-bitnet.cpp is the official inference framework for 1-bit LLMs (e.g., BitNet b1.58). It offers a suite of optimized kernels, that support **fast** and **lossless** inference of 1.58-bit models on CPU and GPU (NPU support will coming next).
+NeuronOS is a complete AI agent runtime that runs **locally on your hardware** — no GPU required, no cloud, no Python. It wraps [BitNet b1.58](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T) ternary models for ultra-efficient inference and adds a full agent stack on top: tools, memory, protocols, and interfaces.
 
-The first release of bitnet.cpp is to support inference on CPUs. bitnet.cpp achieves speedups of **1.37x** to **5.07x** on ARM CPUs, with larger models experiencing greater performance gains. Additionally, it reduces energy consumption by **55.4%** to **70.0%**, further boosting overall efficiency. On x86 CPUs, speedups range from **2.37x** to **6.17x** with energy reductions between **71.9%** to **82.2%**. Furthermore, bitnet.cpp can run a 100B BitNet b1.58 model on a single CPU, achieving speeds comparable to human reading (5-7 tokens per second), significantly enhancing the potential for running LLMs on local devices. Please refer to the [technical report](https://arxiv.org/abs/2410.16144) for more details.
+## Key Features
 
-**Latest optimization** introduces parallel kernel implementations with configurable tiling and embedding quantization support, achieving **1.15x to 2.1x** additional speedup over the original implementation across different hardware platforms and workloads. For detailed technical information, see the [optimization guide](src/README.md).
+| Feature | Description |
+|---------|-------------|
+| **ReAct Agent** | Autonomous reasoning + acting loop with step callbacks |
+| **12 Built-in Tools** | File I/O, shell exec, HTTP, calculator, memory ops, and more |
+| **Persistent Memory** | MemGPT-style 3-tier memory (Core/Recall/Archival) with SQLite+FTS5 |
+| **MCP Server** | Model Context Protocol — works with Claude Desktop, VS Code, Cursor |
+| **MCP Client** | Connect to external MCP servers as tool providers |
+| **HTTP API** | OpenAI-compatible REST API for easy integration |
+| **GBNF Grammar** | Constrained output generation (JSON, tool calls) |
+| **HAL** | Hardware Abstraction Layer with runtime ISA dispatch |
+| **Zero Dependencies** | Single static binary, ~4 MB, no Python/Node/Java needed |
+| **5 Platforms** | Linux x86_64, Linux ARM64, macOS ARM64, Windows x64, Android ARM64 |
 
-<img src="./assets/performance.png" alt="performance_comparison" width="800"/>
+## Platform Support
 
+| Platform | Architecture | ISA Backend | Status |
+|----------|-------------|-------------|--------|
+| Linux | x86_64 | AVX2 / AVX-VNNI | ✅ Tested |
+| Linux | ARM64 | NEON | ✅ Tested |
+| macOS | ARM64 (Apple Silicon) | NEON | ✅ Tested |
+| Windows | x64 | AVX2 | ✅ CI Build |
+| Android | ARM64 | NEON | ✅ CI Build |
+| *Any* | *Any* | Scalar fallback | ✅ Always works |
 
-## Demo
+## Quick Start
 
-A demo of bitnet.cpp running a BitNet b1.58 3B model on Apple M2:
+### 1. Download
 
-https://github.com/user-attachments/assets/7f46b736-edec-4828-b809-4be780a3e5b1
+Grab the latest release for your platform from [Releases](https://github.com/Neuron-OS/neuronos/releases).
 
-## What's New:
-- 01/15/2026 [BitNet CPU Inference Optimization](https://github.com/microsoft/BitNet/blob/main/src/README.md) ![NEW](https://img.shields.io/badge/NEW-red)
-- 05/20/2025 [BitNet Official GPU inference kernel](https://github.com/microsoft/BitNet/blob/main/gpu/README.md)
-- 04/14/2025 [BitNet Official 2B Parameter Model on Hugging Face](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T)
-- 02/18/2025 [Bitnet.cpp: Efficient Edge Inference for Ternary LLMs](https://arxiv.org/abs/2502.11880)
-- 11/08/2024 [BitNet a4.8: 4-bit Activations for 1-bit LLMs](https://arxiv.org/abs/2411.04965)
-- 10/21/2024 [1-bit AI Infra: Part 1.1, Fast and Lossless BitNet b1.58 Inference on CPUs](https://arxiv.org/abs/2410.16144)
-- 10/17/2024 bitnet.cpp 1.0 released.
-- 03/21/2024 [The-Era-of-1-bit-LLMs__Training_Tips_Code_FAQ](https://github.com/microsoft/unilm/blob/master/bitnet/The-Era-of-1-bit-LLMs__Training_Tips_Code_FAQ.pdf)
-- 02/27/2024 [The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits](https://arxiv.org/abs/2402.17764)
-- 10/17/2023 [BitNet: Scaling 1-bit Transformers for Large Language Models](https://arxiv.org/abs/2310.11453)
+```bash
+# Linux / macOS
+tar xzf neuronos-v*-linux-x86_64.tar.gz
+cd neuronos-v*/
+```
 
-## Acknowledgements
+```powershell
+# Windows
+Expand-Archive neuronos-v*-windows-x64.zip -DestinationPath neuronos
+cd neuronos
+```
 
-This project is based on the [llama.cpp](https://github.com/ggerganov/llama.cpp) framework. We would like to thank all the authors for their contributions to the open-source community. Also, bitnet.cpp's kernels are built on top of the Lookup Table methodologies pioneered in [T-MAC](https://github.com/microsoft/T-MAC/). For inference of general low-bit LLMs beyond ternary models, we recommend using T-MAC.
-## Official Models
-<table>
-    </tr>
-    <tr>
-        <th rowspan="2">Model</th>
-        <th rowspan="2">Parameters</th>
-        <th rowspan="2">CPU</th>
-        <th colspan="3">Kernel</th>
-    </tr>
-    <tr>
-        <th>I2_S</th>
-        <th>TL1</th>
-        <th>TL2</th>
-    </tr>
-    <tr>
-        <td rowspan="2"><a href="https://huggingface.co/microsoft/BitNet-b1.58-2B-4T">BitNet-b1.58-2B-4T</a></td>
-        <td rowspan="2">2.4B</td>
-        <td>x86</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-        <td>&#9989;</td>
-    </tr>
-    <tr>
-        <td>ARM</td>
-        <td>&#9989;</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-    </tr>
-</table>
+### 2. Download a Model
 
-## Supported Models
-❗️**We use existing 1-bit LLMs available on [Hugging Face](https://huggingface.co/) to demonstrate the inference capabilities of bitnet.cpp. We hope the release of bitnet.cpp will inspire the development of 1-bit LLMs in large-scale settings in terms of model size and training tokens.**
+NeuronOS uses BitNet b1.58 ternary models in GGUF format (~1.7 GB for 2B params):
 
-<table>
-    </tr>
-    <tr>
-        <th rowspan="2">Model</th>
-        <th rowspan="2">Parameters</th>
-        <th rowspan="2">CPU</th>
-        <th colspan="3">Kernel</th>
-    </tr>
-    <tr>
-        <th>I2_S</th>
-        <th>TL1</th>
-        <th>TL2</th>
-    </tr>
-    <tr>
-        <td rowspan="2"><a href="https://huggingface.co/1bitLLM/bitnet_b1_58-large">bitnet_b1_58-large</a></td>
-        <td rowspan="2">0.7B</td>
-        <td>x86</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-        <td>&#9989;</td>
-    </tr>
-    <tr>
-        <td>ARM</td>
-        <td>&#9989;</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-    </tr>
-    <tr>
-        <td rowspan="2"><a href="https://huggingface.co/1bitLLM/bitnet_b1_58-3B">bitnet_b1_58-3B</a></td>
-        <td rowspan="2">3.3B</td>
-        <td>x86</td>
-        <td>&#10060;</td>
-        <td>&#10060;</td>
-        <td>&#9989;</td>
-    </tr>
-    <tr>
-        <td>ARM</td>
-        <td>&#10060;</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-    </tr>
-    <tr>
-        <td rowspan="2"><a href="https://huggingface.co/HF1BitLLM/Llama3-8B-1.58-100B-tokens">Llama3-8B-1.58-100B-tokens</a></td>
-        <td rowspan="2">8.0B</td>
-        <td>x86</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-        <td>&#9989;</td>
-    </tr>
-    <tr>
-        <td>ARM</td>
-        <td>&#9989;</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-    </tr>
-    <tr>
-        <td rowspan="2"><a href="https://huggingface.co/collections/tiiuae/falcon3-67605ae03578be86e4e87026">Falcon3 Family</a></td>
-        <td rowspan="2">1B-10B</td>
-        <td>x86</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-        <td>&#9989;</td>
-    </tr>
-    <tr>
-        <td>ARM</td>
-        <td>&#9989;</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-    </tr>
-    <tr>
-        <td rowspan="2"><a href="https://huggingface.co/collections/tiiuae/falcon-edge-series-6804fd13344d6d8a8fa71130">Falcon-E Family</a></td>
-        <td rowspan="2">1B-3B</td>
-        <td>x86</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-        <td>&#9989;</td>
-    </tr>
-    <tr>
-        <td>ARM</td>
-        <td>&#9989;</td>
-        <td>&#9989;</td>
-        <td>&#10060;</td>
-    </tr>
-</table>
+```bash
+curl -L -o model.gguf \
+  https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf
+```
 
+### 3. Run
 
+```bash
+# Interactive chat
+./bin/neuronos-cli model.gguf chat
 
-## Installation
+# Single prompt
+./bin/neuronos-cli model.gguf run "Explain quantum computing in 3 sentences"
+
+# Agent mode (autonomous, with tools)
+./bin/neuronos-cli model.gguf agent "List all .c files in the current directory"
+
+# Start OpenAI-compatible HTTP server
+./bin/neuronos-cli model.gguf serve --port 8080
+
+# Start MCP server (for Claude Desktop / VS Code)
+./bin/neuronos-cli model.gguf mcp
+
+# Hardware info
+./bin/neuronos-cli hwinfo
+```
+
+## Install Script (Linux / macOS)
+
+One-line install via `gh` CLI (works with private repos):
+
+```bash
+bash <(gh api repos/Neuron-OS/neuronos/contents/scripts/install.sh --jq '.content' | base64 -d)
+```
+
+This downloads the latest release for your platform and optionally downloads the model.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Layer 7: Applications                              │
+│    CLI (6 modes) │ HTTP Server │ MCP Server          │
+├─────────────────────────────────────────────────────┤
+│  Layer 6: Agent                                     │
+│    ReAct loop │ Tool dispatch │ Memory integration   │
+├─────────────────────────────────────────────────────┤
+│  Layer 5: Tools                                     │
+│    12 built-ins │ Registry │ Capability sandboxing   │
+├─────────────────────────────────────────────────────┤
+│  Layer 4: Grammar                                   │
+│    GBNF constrained generation (JSON, tool calls)   │
+├─────────────────────────────────────────────────────┤
+│  Layer 3: Inference                                 │
+│    llama.cpp wrapper (BitNet I2_S ternary kernels)  │
+├─────────────────────────────────────────────────────┤
+│  Layer 2.5: Memory                                  │
+│    SQLite+FTS5 │ Core/Recall/Archival (MemGPT-style)│
+├─────────────────────────────────────────────────────┤
+│  Layer 2: HAL (Hardware Abstraction Layer)          │
+│    Runtime ISA dispatch: Scalar│AVX2│VNNI│NEON      │
+├─────────────────────────────────────────────────────┤
+│  Layer 1: Hardware                                  │
+│    x86-64 │ ARM64 │ RISC-V │ WASM (planned)        │
+└─────────────────────────────────────────────────────┘
+```
+
+## Build from Source
 
 ### Requirements
-- python>=3.9
-- cmake>=3.22
-- clang>=18
-    - For Windows users, install [Visual Studio 2022](https://visualstudio.microsoft.com/downloads/). In the installer, toggle on at least the following options(this also automatically installs the required additional tools like CMake):
-        -  Desktop-development with C++
-        -  C++-CMake Tools for Windows
-        -  Git for Windows
-        -  C++-Clang Compiler for Windows
-        -  MS-Build Support for LLVM-Toolset (clang)
-    - For Debian/Ubuntu users, you can download with [Automatic installation script](https://apt.llvm.org/)
 
-        `bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"`
-- conda (highly recommend)
+- **CMake** ≥ 3.14
+- **C/C++ Compiler:** GCC 11+, Clang 14+, or MSVC 2022
+- No Python, no conda, no pip needed
 
-### Build from source
-
-> [!IMPORTANT]
-> If you are using Windows, please remember to always use a Developer Command Prompt / PowerShell for VS2022 for the following commands. Please refer to the FAQs below if you see any issues.
-
-1. Clone the repo
-```bash
-git clone --recursive https://github.com/microsoft/BitNet.git
-cd BitNet
-```
-2. Install the dependencies
-```bash
-# (Recommended) Create a new conda environment
-conda create -n bitnet-cpp python=3.9
-conda activate bitnet-cpp
-
-pip install -r requirements.txt
-```
-3. Build the project
-```bash
-# Manually download the model and run with local path
-huggingface-cli download microsoft/BitNet-b1.58-2B-4T-gguf --local-dir models/BitNet-b1.58-2B-4T
-python setup_env.py -md models/BitNet-b1.58-2B-4T -q i2_s
-
-```
-<pre>
-usage: setup_env.py [-h] [--hf-repo {1bitLLM/bitnet_b1_58-large,1bitLLM/bitnet_b1_58-3B,HF1BitLLM/Llama3-8B-1.58-100B-tokens,tiiuae/Falcon3-1B-Instruct-1.58bit,tiiuae/Falcon3-3B-Instruct-1.58bit,tiiuae/Falcon3-7B-Instruct-1.58bit,tiiuae/Falcon3-10B-Instruct-1.58bit}] [--model-dir MODEL_DIR] [--log-dir LOG_DIR] [--quant-type {i2_s,tl1}] [--quant-embd]
-                    [--use-pretuned]
-
-Setup the environment for running inference
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --hf-repo {1bitLLM/bitnet_b1_58-large,1bitLLM/bitnet_b1_58-3B,HF1BitLLM/Llama3-8B-1.58-100B-tokens,tiiuae/Falcon3-1B-Instruct-1.58bit,tiiuae/Falcon3-3B-Instruct-1.58bit,tiiuae/Falcon3-7B-Instruct-1.58bit,tiiuae/Falcon3-10B-Instruct-1.58bit}, -hr {1bitLLM/bitnet_b1_58-large,1bitLLM/bitnet_b1_58-3B,HF1BitLLM/Llama3-8B-1.58-100B-tokens,tiiuae/Falcon3-1B-Instruct-1.58bit,tiiuae/Falcon3-3B-Instruct-1.58bit,tiiuae/Falcon3-7B-Instruct-1.58bit,tiiuae/Falcon3-10B-Instruct-1.58bit}
-                        Model used for inference
-  --model-dir MODEL_DIR, -md MODEL_DIR
-                        Directory to save/load the model
-  --log-dir LOG_DIR, -ld LOG_DIR
-                        Directory to save the logging info
-  --quant-type {i2_s,tl1}, -q {i2_s,tl1}
-                        Quantization type
-  --quant-embd          Quantize the embeddings to f16
-  --use-pretuned, -p    Use the pretuned kernel parameters
-</pre>
-## Usage
-### Basic usage
-```bash
-# Run inference with the quantized model
-python run_inference.py -m models/BitNet-b1.58-2B-4T/ggml-model-i2_s.gguf -p "You are a helpful assistant" -cnv
-```
-<pre>
-usage: run_inference.py [-h] [-m MODEL] [-n N_PREDICT] -p PROMPT [-t THREADS] [-c CTX_SIZE] [-temp TEMPERATURE] [-cnv]
-
-Run inference
-
-optional arguments:
-  -h, --help            show this help message and exit
-  -m MODEL, --model MODEL
-                        Path to model file
-  -n N_PREDICT, --n-predict N_PREDICT
-                        Number of tokens to predict when generating text
-  -p PROMPT, --prompt PROMPT
-                        Prompt to generate text from
-  -t THREADS, --threads THREADS
-                        Number of threads to use
-  -c CTX_SIZE, --ctx-size CTX_SIZE
-                        Size of the prompt context
-  -temp TEMPERATURE, --temperature TEMPERATURE
-                        Temperature, a hyperparameter that controls the randomness of the generated text
-  -cnv, --conversation  Whether to enable chat mode or not (for instruct models.)
-                        (When this option is turned on, the prompt specified by -p will be used as the system prompt.)
-</pre>
-
-### Benchmark
-We provide scripts to run the inference benchmark providing a model.
-
-```  
-usage: e2e_benchmark.py -m MODEL [-n N_TOKEN] [-p N_PROMPT] [-t THREADS]  
-   
-Setup the environment for running the inference  
-   
-required arguments:  
-  -m MODEL, --model MODEL  
-                        Path to the model file. 
-   
-optional arguments:  
-  -h, --help  
-                        Show this help message and exit. 
-  -n N_TOKEN, --n-token N_TOKEN  
-                        Number of generated tokens. 
-  -p N_PROMPT, --n-prompt N_PROMPT  
-                        Prompt to generate text from. 
-  -t THREADS, --threads THREADS  
-                        Number of threads to use. 
-```  
-   
-Here's a brief explanation of each argument:  
-   
-- `-m`, `--model`: The path to the model file. This is a required argument that must be provided when running the script.  
-- `-n`, `--n-token`: The number of tokens to generate during the inference. It is an optional argument with a default value of 128.  
-- `-p`, `--n-prompt`: The number of prompt tokens to use for generating text. This is an optional argument with a default value of 512.  
-- `-t`, `--threads`: The number of threads to use for running the inference. It is an optional argument with a default value of 2.  
-- `-h`, `--help`: Show the help message and exit. Use this argument to display usage information.  
-   
-For example:  
-   
-```sh  
-python utils/e2e_benchmark.py -m /path/to/model -n 200 -p 256 -t 4  
-```  
-   
-This command would run the inference benchmark using the model located at `/path/to/model`, generating 200 tokens from a 256 token prompt, utilizing 4 threads.  
-
-For the model layout that do not supported by any public model, we provide scripts to generate a dummy model with the given model layout, and run the benchmark on your machine:
+### Linux / macOS
 
 ```bash
-python utils/generate-dummy-bitnet-model.py models/bitnet_b1_58-large --outfile models/dummy-bitnet-125m.tl1.gguf --outtype tl1 --model-size 125M
+git clone --recursive https://github.com/Neuron-OS/neuronos.git
+cd neuronos
 
-# Run benchmark with the generated model, use -m to specify the model path, -p to specify the prompt processed, -n to specify the number of token to generate
-python utils/e2e_benchmark.py -m models/dummy-bitnet-125m.tl1.gguf -p 512 -n 128
+cmake -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++ \
+  -DBITNET_X86_TL2=OFF \
+  -DBUILD_SHARED_LIBS=OFF
+
+cmake --build build -j$(nproc)
+
+# Run tests (31/31 should pass)
+./build/bin/test_hal && ./build/bin/test_memory && ./build/bin/test_engine
 ```
 
-### Convert from `.safetensors` Checkpoints
+### Windows (MSVC)
 
-```sh
-# Prepare the .safetensors model file
-huggingface-cli download microsoft/bitnet-b1.58-2B-4T-bf16 --local-dir ./models/bitnet-b1.58-2B-4T-bf16
+Open a **Developer PowerShell for VS 2022**, then:
 
-# Convert to gguf model
-python ./utils/convert-helper-bitnet.py ./models/bitnet-b1.58-2B-4T-bf16
+```powershell
+git clone --recursive https://github.com/Neuron-OS/neuronos.git
+cd neuronos
+
+cmake -B build -G "Ninja Multi-Config" `
+  -DBITNET_X86_TL2=OFF `
+  -DBUILD_SHARED_LIBS=OFF
+
+cmake --build build --config Release -j $env:NUMBER_OF_PROCESSORS
+
+# Run tests
+.\build\bin\Release\test_hal.exe
+.\build\bin\Release\test_memory.exe
+.\build\bin\Release\test_engine.exe
 ```
 
-### FAQ (Frequently Asked Questions)📌 
+### Android (cross-compile)
 
-#### Q1: The build dies with errors building llama.cpp due to issues with std::chrono in log.cpp?
+```bash
+cmake -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-28 \
+  -DBITNET_X86_TL2=OFF \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DGGML_OPENMP=OFF
 
-**A:**
-This is an issue introduced in recent version of llama.cpp. Please refer to this [commit](https://github.com/tinglou/llama.cpp/commit/4e3db1e3d78cc1bcd22bcb3af54bd2a4628dd323) in the [discussion](https://github.com/abetlen/llama-cpp-python/issues/1942) to fix this issue.
-
-#### Q2: How to build with clang in conda environment on windows?
-
-**A:** 
-Before building the project, verify your clang installation and access to Visual Studio tools by running:
-```
-clang -v
-```
-
-This command checks that you are using the correct version of clang and that the Visual Studio tools are available. If you see an error message such as:
-```
-'clang' is not recognized as an internal or external command, operable program or batch file.
+cmake --build build --config Release -j$(nproc)
 ```
 
-It indicates that your command line window is not properly initialized for Visual Studio tools.
+## CLI Modes
 
-• If you are using Command Prompt, run:
-```
-"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat" -startdir=none -arch=x64 -host_arch=x64
+| Mode | Command | Description |
+|------|---------|-------------|
+| **run** | `neuronos-cli model.gguf run "prompt"` | Single completion |
+| **chat** | `neuronos-cli model.gguf chat` | Interactive REPL |
+| **agent** | `neuronos-cli model.gguf agent "task"` | ReAct agent with tools |
+| **serve** | `neuronos-cli model.gguf serve --port 8080` | HTTP server (OpenAI API) |
+| **mcp** | `neuronos-cli model.gguf mcp` | MCP server (stdio) |
+| **hwinfo** | `neuronos-cli hwinfo` | Show hardware capabilities |
+
+## Performance
+
+Measured on Intel i7-12650H (AVX-VNNI), BitNet b1.58 2B model, 4 threads:
+
+| Metric | Value |
+|--------|-------|
+| Prompt processing | 95.02 tokens/sec |
+| Text generation | 21.01 tokens/sec |
+| Binary size | ~4 MB (static, stripped) |
+| RAM usage | ~1.8 GB (2B model) |
+| Context window | 2048 tokens (8192 planned) |
+
+## Supported Models
+
+NeuronOS runs any BitNet b1.58 ternary model in GGUF format:
+
+| Model | Parameters | HuggingFace |
+|-------|-----------|-------------|
+| **BitNet b1.58 2B-4T** (recommended) | 2.4B | [microsoft/BitNet-b1.58-2B-4T-gguf](https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf) |
+| bitnet_b1_58-large | 0.7B | [1bitLLM/bitnet_b1_58-large](https://huggingface.co/1bitLLM/bitnet_b1_58-large) |
+| bitnet_b1_58-3B | 3.3B | [1bitLLM/bitnet_b1_58-3B](https://huggingface.co/1bitLLM/bitnet_b1_58-3B) |
+| Llama3-8B-1.58 | 8.0B | [HF1BitLLM/Llama3-8B-1.58-100B-tokens](https://huggingface.co/HF1BitLLM/Llama3-8B-1.58-100B-tokens) |
+| Falcon3 Family | 1B-10B | [tiiuae/Falcon3](https://huggingface.co/collections/tiiuae/falcon3-67605ae03578be86e4e87026) |
+
+## MCP Integration
+
+NeuronOS can act as an **MCP server** for AI-powered editors and assistants:
+
+```jsonc
+// Claude Desktop config (~/.config/claude/claude_desktop_config.json)
+{
+  "mcpServers": {
+    "neuronos": {
+      "command": "/usr/local/bin/neuronos-cli",
+      "args": ["/path/to/model.gguf", "mcp"]
+    }
+  }
+}
 ```
 
-• If you are using Windows PowerShell, run the following commands:
-```
-Import-Module "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\Microsoft.VisualStudio.DevShell.dll" Enter-VsDevShell 3f0e31ad -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
-```
+## Project Status
 
-These steps will initialize your environment and allow you to use the correct Visual Studio tools.
+- **Version:** 0.8.1
+- **Phase:** 3A — Agent Intelligence
+- **Tests:** 31/31 passing (HAL 4, Engine 11, Memory 12, + Agent 4)
+- **Next:** Context compaction, KV cache management, extended context (8192+ tokens)
+
+## Based On
+
+NeuronOS is built on top of [microsoft/BitNet](https://github.com/microsoft/BitNet) (a fork of [llama.cpp](https://github.com/ggerganov/llama.cpp)). We wrap — not rewrite — the inference engine, adding a complete agent runtime on top.
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
