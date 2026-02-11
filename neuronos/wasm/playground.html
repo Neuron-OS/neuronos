@@ -1,0 +1,1454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NeuronOS Playground — Sovereign AI in Your Browser</title>
+<meta name="description" content="Run a complete AI agent 100% locally in your browser. No cloud, no API keys, no server. Powered by NeuronOS + BitNet ternary models.">
+<style>
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-tertiary: #1a1a28;
+  --bg-card: #16162266;
+  --border: #2a2a3d;
+  --border-glow: #6366f140;
+  --text-primary: #e8e8f0;
+  --text-secondary: #9898b0;
+  --text-muted: #666680;
+  --accent: #6366f1;
+  --accent-light: #818cf8;
+  --accent-dim: #4f46e520;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  --gradient-main: linear-gradient(135deg, #6366f1, #8b5cf6, #a855f7);
+  --gradient-subtle: linear-gradient(135deg, #6366f110, #a855f710);
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow-glow: 0 0 40px #6366f115;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Animated Background ── */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 80% 60% at 20% 20%, #6366f108, transparent),
+    radial-gradient(ellipse 60% 80% at 80% 80%, #a855f708, transparent),
+    radial-gradient(ellipse 50% 50% at 50% 50%, #8b5cf605, transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── Header ── */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(20px) saturate(180%);
+  background: var(--bg-primary)e0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+}
+
+.header-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+}
+
+.logo-icon {
+  width: 36px;
+  height: 36px;
+  background: var(--gradient-main);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 800;
+  color: white;
+  box-shadow: var(--shadow-glow);
+}
+
+.logo-text {
+  font-size: 20px;
+  font-weight: 700;
+  background: var(--gradient-main);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  letter-spacing: -0.5px;
+}
+
+.logo-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: var(--accent-dim);
+  color: var(--accent-light);
+  border-radius: 100px;
+  font-weight: 600;
+  border: 1px solid var(--border-glow);
+}
+
+.header-links {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-links a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+.header-links a:hover { color: var(--text-primary); }
+
+/* ── Main Layout ── */
+.main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Hero Section ── */
+.hero {
+  text-align: center;
+  padding: 48px 0 32px;
+}
+
+.hero h1 {
+  font-size: clamp(28px, 5vw, 44px);
+  font-weight: 800;
+  letter-spacing: -1px;
+  line-height: 1.2;
+  margin-bottom: 16px;
+}
+
+.hero h1 .gradient {
+  background: var(--gradient-main);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero p {
+  color: var(--text-secondary);
+  font-size: 17px;
+  max-width: 640px;
+  margin: 0 auto 24px;
+  line-height: 1.6;
+}
+
+.features-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.feature-tag {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 100px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  font-weight: 500;
+}
+.feature-tag.active {
+  border-color: var(--accent);
+  color: var(--accent-light);
+  background: var(--accent-dim);
+}
+
+/* ── App Container ── */
+.app-container {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 20px;
+  min-height: calc(100vh - 300px);
+}
+
+@media (max-width: 768px) {
+  .app-container {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Sidebar ── */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  backdrop-filter: blur(10px);
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+/* Model Selection */
+.model-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 8px;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
+.model-option:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.model-option.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: var(--shadow-glow);
+}
+
+.model-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  background: var(--gradient-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.model-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-name {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Load Button */
+.btn-primary {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--gradient-main);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+  margin-top: 8px;
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px #6366f140;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+  margin-top: 8px;
+}
+
+.btn-secondary:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
+
+/* Progress Bar */
+.progress-container {
+  display: none;
+  margin-top: 12px;
+}
+
+.progress-container.visible {
+  display: block;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--gradient-main);
+  border-radius: 3px;
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  text-align: center;
+}
+
+/* Status Indicator */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  overflow: hidden;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+.status-dot.loading {
+  background: var(--warning);
+  animation: pulse 1.5s infinite;
+}
+
+.status-dot.ready {
+  background: var(--success);
+}
+
+.status-dot.error {
+  background: var(--error);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Settings */
+.setting-group {
+  margin-bottom: 14px;
+}
+
+.setting-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.setting-label span {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-family: var(--font-mono);
+}
+
+input[type="range"] {
+  width: 100%;
+  height: 4px;
+  -webkit-appearance: none;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 8px var(--accent-dim);
+}
+
+/* ── Chat Area ── */
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  min-height: 500px;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  scroll-behavior: smooth;
+}
+
+/* Welcome Screen */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  text-align: center;
+  padding: 40px;
+}
+
+.welcome-icon {
+  width: 80px;
+  height: 80px;
+  border-radius: 20px;
+  background: var(--gradient-main);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 36px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow-glow);
+}
+
+.welcome h2 {
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+.welcome p {
+  color: var(--text-secondary);
+  font-size: 15px;
+  max-width: 500px;
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+
+.example-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+.example-prompt {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.example-prompt:hover {
+  border-color: var(--accent);
+  color: var(--accent-light);
+  background: var(--accent-dim);
+}
+
+/* Messages */
+.message {
+  margin-bottom: 20px;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.message-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.message-avatar.user {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.message-avatar.assistant {
+  background: var(--gradient-main);
+  color: white;
+}
+
+.message-role {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.message-body {
+  padding-left: 36px;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+.message-body pre {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  margin: 12px 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.message-body code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.message-body pre code {
+  background: none;
+  padding: 0;
+}
+
+/* Agent Steps */
+.agent-step {
+  padding: 10px 14px;
+  margin: 8px 0;
+  margin-left: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  border-left: 3px solid;
+}
+
+.agent-step.thinking {
+  background: #6366f110;
+  border-color: var(--accent);
+  color: var(--accent-light);
+}
+
+.agent-step.tool {
+  background: #22c55e10;
+  border-color: var(--success);
+  color: #4ade80;
+}
+
+.agent-step.observation {
+  background: #f59e0b10;
+  border-color: var(--warning);
+  color: #fbbf24;
+}
+
+.agent-step-label {
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+/* Streaming indicator */
+.streaming-indicator {
+  display: inline-flex;
+  gap: 4px;
+  padding-left: 36px;
+}
+
+.streaming-indicator span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: bounce 1.4s infinite both;
+}
+
+.streaming-indicator span:nth-child(2) { animation-delay: 0.2s; }
+.streaming-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1); }
+}
+
+/* Input Area */
+.chat-input-area {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.chat-input-wrapper {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.chat-input {
+  flex: 1;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  padding: 12px 16px;
+  font-size: 15px;
+  font-family: inherit;
+  line-height: 1.5;
+  outline: none;
+  min-height: 48px;
+  max-height: 120px;
+  transition: border-color 0.2s;
+}
+
+.chat-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.chat-input::placeholder {
+  color: var(--text-muted);
+}
+
+.send-btn {
+  width: 48px;
+  height: 48px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--gradient-main);
+  color: white;
+  font-size: 20px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.send-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px #6366f140;
+}
+
+.send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Stats Bar ── */
+.stats-bar {
+  display: flex;
+  gap: 24px;
+  justify-content: center;
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.stat {
+  text-align: center;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  background: var(--gradient-main);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 2px;
+}
+
+/* ── Footer ── */
+.footer {
+  text-align: center;
+  padding: 40px 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+  border-top: 1px solid var(--border);
+  margin-top: 40px;
+}
+
+.footer a {
+  color: var(--accent-light);
+  text-decoration: none;
+}
+
+/* ── File Drop Zone ── */
+.drop-zone {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: var(--bg-primary)e0;
+  z-index: 200;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(8px);
+}
+
+.drop-zone.visible {
+  display: flex;
+}
+
+.drop-zone-inner {
+  border: 3px dashed var(--accent);
+  border-radius: 24px;
+  padding: 60px 80px;
+  text-align: center;
+}
+
+.drop-zone-inner h2 {
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+
+.drop-zone-inner p {
+  color: var(--text-secondary);
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">N</div>
+      <span class="logo-text">NeuronOS</span>
+      <span class="logo-badge">WASM</span>
+    </div>
+    <div class="header-links">
+      <a href="https://github.com/user/neuronos" target="_blank">GitHub</a>
+      <a href="#" id="link-docs">Docs</a>
+    </div>
+  </div>
+</header>
+
+<!-- Hero -->
+<main class="main">
+  <section class="hero">
+    <h1>
+      <span class="gradient">Sovereign AI</span> in Your Browser
+    </h1>
+    <p>
+      A complete AI agent running 100% locally in your browser.
+      No cloud. No API keys. No server. Your data never leaves your device.
+    </p>
+    <div class="features-bar">
+      <span class="feature-tag active">100% Local</span>
+      <span class="feature-tag active">Zero Cloud</span>
+      <span class="feature-tag">BitNet 1.58-bit</span>
+      <span class="feature-tag">ReAct Agent</span>
+      <span class="feature-tag">Persistent Memory</span>
+      <span class="feature-tag">WASM SIMD</span>
+    </div>
+  </section>
+
+  <!-- App -->
+  <div class="app-container">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+
+      <!-- Status -->
+      <div class="status-bar">
+        <div class="status-dot" id="status-dot"></div>
+        <div class="status-text" id="status-text">Ready to start</div>
+      </div>
+
+      <!-- Model Selection -->
+      <div class="card">
+        <div class="card-title">Select Model</div>
+
+        <button class="model-option selected" data-model="bitnet-2b"
+                data-url="https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf"
+                data-size="1.71">
+          <div class="model-icon">&#x1F9E0;</div>
+          <div class="model-info">
+            <div class="model-name">BitNet 2B (1.58-bit)</div>
+            <div class="model-meta">1.71 GB &middot; Best for browsers</div>
+          </div>
+        </button>
+
+        <button class="model-option" data-model="custom"
+                data-url="" data-size="0">
+          <div class="model-icon">&#x1F4C1;</div>
+          <div class="model-info">
+            <div class="model-name">Load from File</div>
+            <div class="model-meta">Drag & drop or pick a .gguf file</div>
+          </div>
+        </button>
+
+        <input type="file" id="file-picker" accept=".gguf" style="display:none">
+
+        <button class="btn-primary" id="btn-load-model">
+          Download & Load Model
+        </button>
+
+        <button class="btn-secondary" id="btn-clear-cache">
+          Clear Cached Models
+        </button>
+
+        <div class="progress-container" id="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-text" id="progress-text">0%</div>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div class="card">
+        <div class="card-title">Settings</div>
+
+        <div class="setting-group">
+          <div class="setting-label">
+            Temperature <span id="temp-value">0.7</span>
+          </div>
+          <input type="range" id="setting-temp" min="0" max="2" step="0.1" value="0.7">
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-label">
+            Max Tokens <span id="tokens-value">256</span>
+          </div>
+          <input type="range" id="setting-tokens" min="32" max="1024" step="32" value="256">
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-label">
+            Context Size <span id="ctx-value">2048</span>
+          </div>
+          <input type="range" id="setting-ctx" min="512" max="4096" step="256" value="2048">
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="card" id="stats-card" style="display:none">
+        <div class="card-title">Performance</div>
+        <div class="stats-bar">
+          <div class="stat">
+            <div class="stat-value" id="stat-speed">--</div>
+            <div class="stat-label">tokens/s</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="stat-tokens">0</div>
+            <div class="stat-label">generated</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value" id="stat-memory">--</div>
+            <div class="stat-label">MB RAM</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Chat Area -->
+    <div class="chat-container">
+      <div class="chat-messages" id="chat-messages">
+
+        <!-- Welcome -->
+        <div class="welcome" id="welcome">
+          <div class="welcome-icon">&#x1F9E0;</div>
+          <h2>NeuronOS Playground</h2>
+          <p>
+            Load a model to start chatting. Everything runs 100% locally in your browser
+            using WebAssembly — your data never leaves this device.
+          </p>
+          <div class="example-prompts">
+            <button class="example-prompt" data-prompt="Explain quantum computing in simple terms">Quantum computing</button>
+            <button class="example-prompt" data-prompt="Write a Python function to sort a list">Sort function</button>
+            <button class="example-prompt" data-prompt="What is the meaning of life?">Meaning of life</button>
+            <button class="example-prompt" data-prompt="Explain how NeuronOS works">About NeuronOS</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input -->
+      <div class="chat-input-area">
+        <div class="chat-input-wrapper">
+          <textarea class="chat-input" id="chat-input"
+                    placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+                    rows="1" disabled></textarea>
+          <button class="send-btn" id="btn-send" disabled title="Send">&#x27A4;</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Drop Zone -->
+<div class="drop-zone" id="drop-zone">
+  <div class="drop-zone-inner">
+    <h2>&#x1F4E5; Drop your .gguf model here</h2>
+    <p>The model will be loaded directly into the browser engine</p>
+  </div>
+</div>
+
+<!-- Footer -->
+<footer class="footer">
+  NeuronOS v0.9.1 &middot; Sovereign AI Agent Runtime &middot;
+  <a href="https://github.com/user/neuronos">Open Source (MIT)</a> &middot;
+  100% local, zero cloud dependency
+</footer>
+
+<script type="module">
+import { NeuronOS } from './neuronos-web.js';
+
+/* ═══════════════════════════════════════════
+ * State
+ * ═══════════════════════════════════════════ */
+let neuronos = null;
+let modelLoaded = false;
+let isGenerating = false;
+let totalTokens = 0;
+let genStartTime = 0;
+
+/* ═══════════════════════════════════════════
+ * DOM References
+ * ═══════════════════════════════════════════ */
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+const chatMessages = $('#chat-messages');
+const chatInput = $('#chat-input');
+const btnSend = $('#btn-send');
+const btnLoadModel = $('#btn-load-model');
+const btnClearCache = $('#btn-clear-cache');
+const filePicker = $('#file-picker');
+const progressContainer = $('#progress-container');
+const progressFill = $('#progress-fill');
+const progressText = $('#progress-text');
+const statusDot = $('#status-dot');
+const statusText = $('#status-text');
+const welcome = $('#welcome');
+const dropZone = $('#drop-zone');
+const statsCard = $('#stats-card');
+
+/* ═══════════════════════════════════════════
+ * NeuronOS Initialization
+ * ═══════════════════════════════════════════ */
+async function initNeuronOS() {
+  neuronos = new NeuronOS({
+    nCtx: parseInt($('#setting-ctx').value),
+
+    onStatus: (text) => {
+      statusText.textContent = text;
+      statusDot.className = 'status-dot loading';
+    },
+
+    onToken: (text) => {
+      appendToLastAssistant(text);
+      totalTokens++;
+      updateStats();
+    },
+
+    onAgentStep: (type, text) => {
+      addAgentStep(type, text);
+    },
+
+    onProgress: ({ loaded, total, percent }) => {
+      progressFill.style.width = percent + '%';
+      if (total > 1000000) {
+        progressText.textContent = `${(loaded/1024/1024).toFixed(0)} / ${(total/1024/1024).toFixed(0)} MB (${percent}%)`;
+      } else {
+        progressText.textContent = `${percent}%`;
+      }
+    },
+
+    onError: (text) => {
+      statusDot.className = 'status-dot error';
+      statusText.textContent = text;
+      console.error('[NeuronOS]', text);
+    },
+  });
+
+  try {
+    setStatus('Initializing WASM engine...', 'loading');
+    await neuronos.init();
+    setStatus('Engine ready. Select a model to begin.', 'ready');
+    btnLoadModel.disabled = false;
+  } catch (e) {
+    setStatus(`Init failed: ${e.message}`, 'error');
+    console.error(e);
+  }
+}
+
+/* ═══════════════════════════════════════════
+ * Model Loading
+ * ═══════════════════════════════════════════ */
+async function loadSelectedModel() {
+  const selected = $('.model-option.selected');
+  if (!selected) return;
+
+  const modelId = selected.dataset.model;
+
+  btnLoadModel.disabled = true;
+  progressContainer.classList.add('visible');
+  progressFill.style.width = '0%';
+
+  try {
+    if (modelId === 'custom') {
+      filePicker.click();
+      return;
+    }
+
+    const url = selected.dataset.url;
+    setStatus('Downloading model...', 'loading');
+    await neuronos.loadModel(url, {
+      nCtx: parseInt($('#setting-ctx').value),
+    });
+
+    onModelReady();
+  } catch (e) {
+    setStatus(`Load failed: ${e.message}`, 'error');
+    btnLoadModel.disabled = false;
+  }
+
+  progressContainer.classList.remove('visible');
+}
+
+function onModelReady() {
+  modelLoaded = true;
+  chatInput.disabled = false;
+  btnSend.disabled = false;
+  btnLoadModel.textContent = 'Model Loaded ✓';
+  statsCard.style.display = 'block';
+  setStatus('Model ready — start chatting!', 'ready');
+
+  // Initialize memory
+  neuronos.initMemory().catch(() => {});
+
+  // Hide welcome, focus input
+  chatInput.focus();
+}
+
+/* ═══════════════════════════════════════════
+ * Chat
+ * ═══════════════════════════════════════════ */
+async function sendMessage() {
+  const text = chatInput.value.trim();
+  if (!text || !modelLoaded || isGenerating) return;
+
+  // Hide welcome
+  if (welcome) welcome.style.display = 'none';
+
+  // Add user message
+  addMessage('user', text);
+  chatInput.value = '';
+  chatInput.style.height = 'auto';
+
+  // Add assistant placeholder
+  addMessage('assistant', '');
+  showStreamingIndicator();
+  isGenerating = true;
+  btnSend.disabled = true;
+  genStartTime = performance.now();
+  totalTokens = 0;
+
+  try {
+    const temp = parseFloat($('#setting-temp').value);
+    const nPredict = parseInt($('#setting-tokens').value);
+
+    const response = await neuronos.chat(text, {
+      nPredict,
+      temp,
+    });
+
+    hideStreamingIndicator();
+    setLastAssistantContent(response);
+    updateStats();
+  } catch (e) {
+    hideStreamingIndicator();
+    setLastAssistantContent(`Error: ${e.message}`);
+  }
+
+  isGenerating = false;
+  btnSend.disabled = false;
+  chatInput.focus();
+}
+
+/* ═══════════════════════════════════════════
+ * UI Helpers
+ * ═══════════════════════════════════════════ */
+function setStatus(text, state) {
+  statusText.textContent = text;
+  statusDot.className = `status-dot ${state}`;
+}
+
+function addMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = `message message-${role}`;
+  div.innerHTML = `
+    <div class="message-header">
+      <div class="message-avatar ${role}">${role === 'user' ? '&#x1F464;' : '&#x1F9E0;'}</div>
+      <div class="message-role">${role === 'user' ? 'You' : 'NeuronOS'}</div>
+    </div>
+    <div class="message-body">${formatMessage(text)}</div>
+  `;
+  chatMessages.appendChild(div);
+  scrollToBottom();
+}
+
+function addAgentStep(type, text) {
+  const div = document.createElement('div');
+  div.className = `agent-step ${type}`;
+  const labels = { thinking: 'Thinking', tool: 'Tool Call', observation: 'Observation' };
+  div.innerHTML = `
+    <div class="agent-step-label">${labels[type] || type}</div>
+    ${escapeHtml(text)}
+  `;
+  // Insert before the last message body
+  const lastMsg = chatMessages.querySelector('.message:last-child .message-body');
+  if (lastMsg) {
+    lastMsg.parentElement.insertBefore(div, lastMsg);
+  }
+  scrollToBottom();
+}
+
+function appendToLastAssistant(text) {
+  const bodies = chatMessages.querySelectorAll('.message-assistant .message-body');
+  const last = bodies[bodies.length - 1];
+  if (last) {
+    last.textContent += text;
+  }
+}
+
+function setLastAssistantContent(text) {
+  const bodies = chatMessages.querySelectorAll('.message-assistant .message-body');
+  const last = bodies[bodies.length - 1];
+  if (last) {
+    last.innerHTML = formatMessage(text);
+  }
+}
+
+function showStreamingIndicator() {
+  const div = document.createElement('div');
+  div.className = 'streaming-indicator';
+  div.id = 'streaming';
+  div.innerHTML = '<span></span><span></span><span></span>';
+  chatMessages.appendChild(div);
+  scrollToBottom();
+}
+
+function hideStreamingIndicator() {
+  const el = document.getElementById('streaming');
+  if (el) el.remove();
+}
+
+function scrollToBottom() {
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function updateStats() {
+  const elapsed = (performance.now() - genStartTime) / 1000;
+  const speed = totalTokens > 0 && elapsed > 0 ? (totalTokens / elapsed).toFixed(1) : '--';
+  $('#stat-speed').textContent = speed;
+  $('#stat-tokens').textContent = totalTokens;
+
+  // Estimate memory usage
+  if (performance.memory) {
+    $('#stat-memory').textContent = (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(0);
+  }
+}
+
+function formatMessage(text) {
+  if (!text) return '';
+  // Basic markdown: code blocks, inline code, bold, italic, links
+  let html = escapeHtml(text);
+  // Code blocks
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Links
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+  // Line breaks
+  html = html.replace(/\n/g, '<br>');
+  return html;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+/* ═══════════════════════════════════════════
+ * Event Handlers
+ * ═══════════════════════════════════════════ */
+
+// Send button
+btnSend.addEventListener('click', sendMessage);
+
+// Enter to send, shift+enter for newline
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// Auto-resize textarea
+chatInput.addEventListener('input', () => {
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+});
+
+// Load model button
+btnLoadModel.addEventListener('click', loadSelectedModel);
+
+// Clear cache
+btnClearCache.addEventListener('click', async () => {
+  if (neuronos) await neuronos.clearCache();
+  setStatus('Cache cleared', 'ready');
+});
+
+// Model selection
+$$('.model-option').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    $$('.model-option').forEach((b) => b.classList.remove('selected'));
+    btn.classList.add('selected');
+
+    if (btn.dataset.model === 'custom') {
+      btnLoadModel.textContent = 'Select File...';
+    } else {
+      btnLoadModel.textContent = 'Download & Load Model';
+    }
+  });
+});
+
+// File picker
+filePicker.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  try {
+    setStatus(`Loading ${file.name}...`, 'loading');
+    await neuronos.loadModelFromFile(file, {
+      nCtx: parseInt($('#setting-ctx').value),
+    });
+    onModelReady();
+  } catch (err) {
+    setStatus(`Load failed: ${err.message}`, 'error');
+  }
+  progressContainer.classList.remove('visible');
+  btnLoadModel.disabled = false;
+});
+
+// Example prompts
+$$('.example-prompt').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    chatInput.value = btn.dataset.prompt;
+    chatInput.focus();
+    if (modelLoaded) sendMessage();
+  });
+});
+
+// Settings sliders
+$('#setting-temp').addEventListener('input', (e) => {
+  $('#temp-value').textContent = e.target.value;
+});
+$('#setting-tokens').addEventListener('input', (e) => {
+  $('#tokens-value').textContent = e.target.value;
+});
+$('#setting-ctx').addEventListener('input', (e) => {
+  $('#ctx-value').textContent = e.target.value;
+});
+
+// Drag & Drop
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.classList.add('visible');
+});
+
+document.addEventListener('dragleave', (e) => {
+  if (e.relatedTarget === null) {
+    dropZone.classList.remove('visible');
+  }
+});
+
+dropZone.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('visible');
+
+  const file = e.dataTransfer.files[0];
+  if (file && file.name.endsWith('.gguf')) {
+    try {
+      setStatus(`Loading ${file.name}...`, 'loading');
+      if (!neuronos) await initNeuronOS();
+      await neuronos.loadModelFromFile(file, {
+        nCtx: parseInt($('#setting-ctx').value),
+      });
+      onModelReady();
+    } catch (err) {
+      setStatus(`Load failed: ${err.message}`, 'error');
+    }
+  }
+});
+
+/* ═══════════════════════════════════════════
+ * Browser Compatibility Check
+ * ═══════════════════════════════════════════ */
+function checkBrowserFeatures() {
+  const features = {
+    wasm: typeof WebAssembly !== 'undefined',
+    simd: (() => {
+      try {
+        return WebAssembly.validate(new Uint8Array([
+          0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11
+        ]));
+      } catch { return false; }
+    })(),
+    threads: typeof SharedArrayBuffer !== 'undefined',
+    opfs: 'storage' in navigator && 'getDirectory' in (navigator.storage || {}),
+  };
+
+  console.log('[NeuronOS] Browser features:', features);
+
+  if (!features.wasm) {
+    setStatus('WebAssembly not supported in this browser', 'error');
+    return false;
+  }
+  if (!features.simd) {
+    setStatus('WASM SIMD not supported — performance will be degraded', 'loading');
+  }
+  if (!features.threads) {
+    console.warn('[NeuronOS] SharedArrayBuffer not available — using single-thread mode');
+    const tag = document.querySelector('.feature-tag:nth-child(6)');
+    if (tag) tag.textContent = 'Single Thread';
+  }
+  if (!features.opfs) {
+    console.warn('[NeuronOS] OPFS not available — model caching disabled');
+  }
+
+  return true;
+}
+
+/* ═══════════════════════════════════════════
+ * Startup
+ * ═══════════════════════════════════════════ */
+if (checkBrowserFeatures()) {
+  initNeuronOS();
+} else {
+  btnLoadModel.disabled = true;
+}
+</script>
+
+</body>
+</html>
