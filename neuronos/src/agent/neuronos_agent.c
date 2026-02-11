@@ -17,7 +17,7 @@
 #include <windows.h>
 #endif
 
-/* ---- Built-in GBNF grammar for tool_call/final_answer ---- */
+/* ---- Built-in GBNF grammar for tool_call/final_answer (one-shot mode) ---- */
 static const char TOOL_CALL_GRAMMAR[] =
     "root ::= ws \"{\" ws step ws \"}\" ws\n"
     "step ::= tool-call | final-answer\n"
@@ -42,7 +42,33 @@ static const char TOOL_CALL_GRAMMAR[] =
     "exponent ::= [eE] [+-]? [0-9]+\n"
     "ws ::= [ \\t\\n\\r]*\n";
 
-/* ---- Default system prompt template ---- */
+/* ---- Interactive GBNF grammar: reply OR tool_call OR final_answer ---- */
+static const char INTERACTIVE_GRAMMAR[] =
+    "root ::= ws \"{\" ws content ws \"}\" ws\n"
+    "content ::= reply-content | tool-content | answer-content\n"
+    "reply-content ::= \"\\\"reply\\\"\" ws \":\" ws string\n"
+    "tool-content ::= \"\\\"thought\\\"\" ws \":\" ws string ws \",\" ws "
+    "\"\\\"action\\\"\" ws \":\" ws string ws \",\" ws "
+    "\"\\\"args\\\"\" ws \":\" ws object\n"
+    "answer-content ::= \"\\\"thought\\\"\" ws \":\" ws string ws \",\" ws "
+    "\"\\\"answer\\\"\" ws \":\" ws string\n"
+    "object ::= \"{\" ws \"}\" | \"{\" ws members ws \"}\"\n"
+    "members ::= pair ( ws \",\" ws pair )*\n"
+    "pair ::= string ws \":\" ws value\n"
+    "value ::= string | number | object | array | \"true\" | \"false\" | \"null\"\n"
+    "array ::= \"[\" ws \"]\" | \"[\" ws values ws \"]\"\n"
+    "values ::= value ( ws \",\" ws value )*\n"
+    "string ::= \"\\\"\" characters \"\\\"\"\n"
+    "characters ::= \"\" | characters character\n"
+    "character ::= [^\"\\\\] | \"\\\\\" escape\n"
+    "escape ::= [\"\\\\/bfnrt] | \"u\" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]\n"
+    "number ::= integer fraction? exponent?\n"
+    "integer ::= \"-\"? ( \"0\" | [1-9] [0-9]* )\n"
+    "fraction ::= \".\" [0-9]+\n"
+    "exponent ::= [eE] [+-]? [0-9]+\n"
+    "ws ::= [ \\t\\n\\r]*\n";
+
+/* ---- Default system prompt template (one-shot mode, backward compat) ---- */
 static const char DEFAULT_SYSTEM_PROMPT_TEMPLATE[] =
     "You are a helpful AI assistant with access to tools.\n"
     "You MUST respond with a JSON object in one of two formats:\n\n"
@@ -57,7 +83,7 @@ static const char DEFAULT_SYSTEM_PROMPT_TEMPLATE[] =
     "- Give a final answer when you have enough information.\n"
     "- Respond ONLY with valid JSON, no other text.\n";
 
-/* ---- Model-size-aware system prompt templates ---- */
+/* ---- Model-size-aware system prompt templates (one-shot mode) ---- */
 
 /* Small models (<=3B params): ultra-concise, explicit examples */
 static const char SYSTEM_PROMPT_SMALL[] =
@@ -87,6 +113,46 @@ static const char SYSTEM_PROMPT_LARGE[] =
     "- If a tool errors, try a different approach.\n"
     "- Give a final answer when you have sufficient information.\n"
     "- Be thorough but concise in your answers.\n"
+    "- Respond with valid JSON ONLY, no other text.\n";
+
+/* ---- Interactive mode system prompts (conversational + tools) ---- */
+
+/* Small models (<=3B params): interactive */
+static const char INTERACTIVE_PROMPT_SMALL[] =
+    "You are NeuronOS, a helpful AI assistant. Respond with JSON ONLY.\n\n"
+    "FORMAT 1 - Direct reply (for greetings, conversation, questions you can answer):\n"
+    "{\"reply\": \"your response\"}\n\n"
+    "FORMAT 2 - Use a tool (when you need to do something or get information):\n"
+    "{\"thought\": \"why I need this tool\", \"action\": \"tool_name\", \"args\": {\"key\": \"val\"}}\n\n"
+    "FORMAT 3 - Answer after tools (when you have results from tools):\n"
+    "{\"thought\": \"what I learned\", \"answer\": \"my answer based on tool results\"}\n\n"
+    "%s\n"
+    "RULES:\n"
+    "- Reply directly if you can answer from your knowledge.\n"
+    "- Use tools when you need files, system info, time, calculations, etc.\n"
+    "- After tools, give a final answer with your findings.\n"
+    "- JSON only. No other text.\n";
+
+/* Large models (>=7B params): interactive */
+static const char INTERACTIVE_PROMPT_LARGE[] =
+    "You are NeuronOS, an intelligent AI assistant running locally on the user's device.\n"
+    "You have access to tools and persistent memory. Respond with exactly one JSON object.\n\n"
+    "## Response Formats\n\n"
+    "### Direct Reply (conversation, greetings, questions you can answer from knowledge):\n"
+    "{\"reply\": \"your natural response\"}\n\n"
+    "### Tool Use (when you need to take action or gather information):\n"
+    "{\"thought\": \"step-by-step reasoning\", \"action\": \"tool_name\", "
+    "\"args\": {\"param\": \"value\"}}\n\n"
+    "### Final Answer (after using tools, when you have enough information):\n"
+    "{\"thought\": \"reasoning about results\", \"answer\": \"your comprehensive answer\"}\n\n"
+    "## Available Tools\n"
+    "%s\n"
+    "## Guidelines\n"
+    "- Reply directly for conversation, greetings, and questions you can answer.\n"
+    "- Use tools when you need to interact with files, system, time, calculations.\n"
+    "- After tool results, provide a final answer summarizing your findings.\n"
+    "- Do not guess about files or system state -- use tools.\n"
+    "- Be helpful, concise, and accurate.\n"
     "- Respond with valid JSON ONLY, no other text.\n";
 
 /* ---- Token estimation ---- */
@@ -141,8 +207,15 @@ struct neuronos_agent {
     neuronos_tool_registry_t * tools;
     neuronos_agent_params_t params;
     char * system_prompt;
-    neuronos_memory_t * memory;   /* optional persistent memory (not owned) */
-    int64_t session_id;           /* current recall memory session */
+    char * interactive_prompt;      /* prompt for interactive mode (with reply) */
+    neuronos_memory_t * memory;     /* optional persistent memory (not owned) */
+    int64_t session_id;             /* current recall memory session */
+
+    /* Conversation history for multi-turn interactive mode */
+    char ** conv_roles;             /* role strings (owned copies) */
+    char ** conv_contents;          /* content strings (owned copies) */
+    size_t conv_len;                /* number of messages stored */
+    size_t conv_cap;                /* allocated capacity */
 };
 
 /* ---- Helpers ---- */
@@ -398,18 +471,28 @@ neuronos_agent_t * neuronos_agent_create(neuronos_model_t * model, neuronos_tool
     agent->memory = NULL;
     agent->session_id = 1;
 
+    /* Init conversation history */
+    agent->conv_cap = 32;
+    agent->conv_roles = calloc(agent->conv_cap, sizeof(char *));
+    agent->conv_contents = calloc(agent->conv_cap, sizeof(char *));
+    agent->conv_len = 0;
+
     /* Select system prompt based on model size */
     neuronos_model_info_t minfo = neuronos_model_info(model);
-    const char * prompt_template;
+    const char * oneshot_template;
+    const char * interactive_template;
     if (minfo.n_params > 0 && minfo.n_params <= 4000000000LL) {
-        prompt_template = SYSTEM_PROMPT_SMALL;
+        oneshot_template = SYSTEM_PROMPT_SMALL;
+        interactive_template = INTERACTIVE_PROMPT_SMALL;
     } else if (minfo.n_params > 4000000000LL) {
-        prompt_template = SYSTEM_PROMPT_LARGE;
+        oneshot_template = SYSTEM_PROMPT_LARGE;
+        interactive_template = INTERACTIVE_PROMPT_LARGE;
     } else {
-        prompt_template = DEFAULT_SYSTEM_PROMPT_TEMPLATE;
+        oneshot_template = DEFAULT_SYSTEM_PROMPT_TEMPLATE;
+        interactive_template = INTERACTIVE_PROMPT_SMALL;
     }
 
-    /* Build system prompt with tool descriptions */
+    /* Build system prompts with tool descriptions */
     char * tool_desc;
     if (tools) {
         tool_desc = neuronos_tool_prompt_description(tools);
@@ -417,9 +500,16 @@ neuronos_agent_t * neuronos_agent_create(neuronos_model_t * model, neuronos_tool
         tool_desc = strdup("No tools available.\n");
     }
 
-    size_t prompt_size = strlen(prompt_template) + strlen(tool_desc) + 64;
+    /* One-shot prompt (for agent_run) */
+    size_t prompt_size = strlen(oneshot_template) + strlen(tool_desc) + 64;
     agent->system_prompt = malloc(prompt_size);
-    snprintf(agent->system_prompt, prompt_size, prompt_template, tool_desc);
+    snprintf(agent->system_prompt, prompt_size, oneshot_template, tool_desc);
+
+    /* Interactive prompt (for agent_chat) */
+    size_t iprompt_size = strlen(interactive_template) + strlen(tool_desc) + 64;
+    agent->interactive_prompt = malloc(iprompt_size);
+    snprintf(agent->interactive_prompt, iprompt_size, interactive_template, tool_desc);
+
     free(tool_desc);
 
     if (params.verbose) {
@@ -435,6 +525,14 @@ void neuronos_agent_free(neuronos_agent_t * agent) {
     if (!agent)
         return;
     free(agent->system_prompt);
+    free(agent->interactive_prompt);
+    /* Free conversation history */
+    for (size_t i = 0; i < agent->conv_len; i++) {
+        free(agent->conv_roles[i]);
+        free(agent->conv_contents[i]);
+    }
+    free(agent->conv_roles);
+    free(agent->conv_contents);
     free(agent);
 }
 
@@ -779,6 +877,382 @@ int neuronos_context_compact(neuronos_agent_t * agent) {
      * Returns 0 (no tokens freed outside of a run). */
     (void)agent;
     return 0;
+}
+
+/* ============================================================
+ * CONVERSATION HISTORY HELPERS (for interactive mode)
+ * ============================================================ */
+
+static void conv_history_push(neuronos_agent_t * agent, const char * role, const char * content) {
+    if (!agent || !role || !content) return;
+
+    /* Grow if needed */
+    if (agent->conv_len >= agent->conv_cap) {
+        size_t new_cap = agent->conv_cap * 2;
+        char ** new_roles = realloc(agent->conv_roles, new_cap * sizeof(char *));
+        char ** new_contents = realloc(agent->conv_contents, new_cap * sizeof(char *));
+        if (!new_roles || !new_contents) return;
+        agent->conv_roles = new_roles;
+        agent->conv_contents = new_contents;
+        agent->conv_cap = new_cap;
+    }
+
+    agent->conv_roles[agent->conv_len] = strdup(role);
+    agent->conv_contents[agent->conv_len] = strdup(content);
+    agent->conv_len++;
+}
+
+void neuronos_agent_clear_history(neuronos_agent_t * agent) {
+    if (!agent) return;
+    for (size_t i = 0; i < agent->conv_len; i++) {
+        free(agent->conv_roles[i]);
+        free(agent->conv_contents[i]);
+    }
+    agent->conv_len = 0;
+}
+
+/*
+ * Unescape a JSON string value (handle \\n, \\t, \\", \\\\, etc.)
+ * Returns newly allocated string. Caller must free.
+ */
+static char * json_unescape(const char * s) {
+    if (!s) return NULL;
+    size_t len = strlen(s);
+    char * out = malloc(len + 1);
+    if (!out) return NULL;
+
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\\' && i + 1 < len) {
+            switch (s[i + 1]) {
+            case 'n':  out[j++] = '\n'; i++; break;
+            case 't':  out[j++] = '\t'; i++; break;
+            case 'r':  out[j++] = '\r'; i++; break;
+            case '"':  out[j++] = '"';  i++; break;
+            case '\\': out[j++] = '\\'; i++; break;
+            case '/':  out[j++] = '/';  i++; break;
+            default:   out[j++] = s[i]; break;
+            }
+        } else {
+            out[j++] = s[i];
+        }
+    }
+    out[j] = '\0';
+    return out;
+}
+
+/*
+ * Build the interactive prompt from conversation history + current turn steps.
+ *
+ * Messages:
+ *   [0] system  = interactive system prompt (with tool descriptions + memory)
+ *   [1..N] user/assistant = conversation history
+ *   [N+1] user = current user input
+ *   [N+2..] assistant/user = current turn steps (tool calls + observations)
+ */
+static char * build_interactive_prompt(const neuronos_agent_t * agent,
+                                       const char * enriched_prompt,
+                                       const char ** step_outputs,
+                                       const char ** step_actions,
+                                       const char ** step_observations,
+                                       int n_steps) {
+    /* Count total messages */
+    size_t n_msgs = 1; /* system */
+    n_msgs += agent->conv_len; /* conversation history (includes current user input) */
+    for (int i = 0; i < n_steps; i++) {
+        if (step_outputs[i]) n_msgs++;
+        if (step_observations[i]) n_msgs++;
+    }
+
+    neuronos_chat_msg_t * msgs = calloc(n_msgs, sizeof(neuronos_chat_msg_t));
+    char ** obs_bufs = calloc((size_t)(n_steps > 0 ? n_steps : 1), sizeof(char *));
+    if (!msgs || !obs_bufs) {
+        free(msgs);
+        free(obs_bufs);
+        return NULL;
+    }
+
+    size_t idx = 0;
+
+    /* System prompt */
+    msgs[idx].role = "system";
+    msgs[idx].content = enriched_prompt;
+    idx++;
+
+    /* Conversation history */
+    for (size_t i = 0; i < agent->conv_len; i++) {
+        msgs[idx].role = agent->conv_roles[i];
+        msgs[idx].content = agent->conv_contents[i];
+        idx++;
+    }
+
+    /* Current turn steps (tool calls + observations) */
+    for (int i = 0; i < n_steps; i++) {
+        if (step_outputs[i]) {
+            msgs[idx].role = "assistant";
+            msgs[idx].content = step_outputs[i];
+            idx++;
+        }
+        if (step_observations[i]) {
+            const char * tool = step_actions[i] ? step_actions[i] : "tool";
+            size_t obs_len = strlen("Observation from : ") + strlen(tool) + strlen(step_observations[i]) + 1;
+            obs_bufs[i] = malloc(obs_len);
+            snprintf(obs_bufs[i], obs_len, "Observation from %s: %s", tool, step_observations[i]);
+            msgs[idx].role = "user";
+            msgs[idx].content = obs_bufs[i];
+            idx++;
+        }
+    }
+
+    /* Format with chat template */
+    char * formatted = NULL;
+    neuronos_status_t st = neuronos_chat_format(agent->model, NULL, msgs, idx, true, &formatted);
+
+    /* Free temp buffers */
+    for (int i = 0; i < n_steps; i++) {
+        free(obs_bufs[i]);
+    }
+    free(obs_bufs);
+    free(msgs);
+
+    if (st == NEURONOS_OK && formatted) {
+        return formatted;
+    }
+
+    return NULL;
+}
+
+/* ============================================================
+ * INTERACTIVE AGENT CHAT — Multi-turn Conversational Agent
+ * ============================================================ */
+
+neuronos_agent_result_t neuronos_agent_chat(neuronos_agent_t * agent, const char * user_input,
+                                            neuronos_agent_step_cb on_step, void * user_data) {
+    neuronos_agent_result_t result = {0};
+    double t_start = get_time_ms();
+
+    if (!agent || !user_input) {
+        result.status = NEURONOS_ERROR_INVALID_PARAM;
+        return result;
+    }
+
+    /* Add user message to conversation history */
+    conv_history_push(agent, "user", user_input);
+
+    /* Enrich system prompt with memory if attached */
+    char * enriched_prompt = NULL;
+    if (agent->memory) {
+        enriched_prompt = build_memory_enriched_prompt(agent, agent->interactive_prompt);
+        /* Log user input to recall memory */
+        neuronos_memory_recall_add(agent->memory, agent->session_id,
+                                   "user", user_input, (int)(strlen(user_input) / 4));
+    } else {
+        enriched_prompt = strdup(agent->interactive_prompt);
+    }
+
+    int max_steps = agent->params.max_steps;
+
+    /* Step history (tool calls within this turn only) */
+    const char ** step_outputs = calloc((size_t)max_steps, sizeof(char *));
+    const char ** step_actions = calloc((size_t)max_steps, sizeof(char *));
+    const char ** step_observations = calloc((size_t)max_steps, sizeof(char *));
+
+    if (!step_outputs || !step_actions || !step_observations) {
+        free(step_outputs);
+        free(step_actions);
+        free(step_observations);
+        free(enriched_prompt);
+        result.status = NEURONOS_ERROR_GENERATE;
+        return result;
+    }
+
+    int steps_taken = 0;
+
+    for (int step = 0; step < max_steps; step++) {
+        if (agent->params.verbose) {
+            fprintf(stderr, "\n[neuronos] ── Turn step %d/%d ──\n", step + 1, max_steps);
+        }
+
+        /* Build prompt from conversation history + current turn steps */
+        char * prompt = build_interactive_prompt(agent, enriched_prompt,
+                                                 step_outputs, step_actions,
+                                                 step_observations, step);
+        if (!prompt) {
+            result.status = NEURONOS_ERROR_GENERATE;
+            break;
+        }
+
+        if (agent->params.verbose) {
+            fprintf(stderr, "[neuronos] Prompt: %zu chars (~%d tokens)\n",
+                    strlen(prompt), estimate_tokens(prompt));
+        }
+
+        /* Generate with interactive grammar (reply + tool + answer) */
+        neuronos_gen_params_t gen_params = {
+            .prompt = prompt,
+            .max_tokens = agent->params.max_tokens_per_step,
+            .temperature = agent->params.temperature,
+            .top_p = 0.95f,
+            .top_k = 40,
+            .grammar = INTERACTIVE_GRAMMAR,
+            .grammar_root = "root",
+            .on_token = NULL,
+            .user_data = NULL,
+            .seed = 0,
+        };
+
+        neuronos_gen_result_t gen = neuronos_generate(agent->model, gen_params);
+        free(prompt);
+
+        if (gen.status != NEURONOS_OK || !gen.text) {
+            neuronos_gen_result_free(&gen);
+            result.status = NEURONOS_ERROR_GENERATE;
+            break;
+        }
+
+        if (agent->params.verbose) {
+            fprintf(stderr, "[neuronos] Model output: %s\n", gen.text);
+        }
+
+        steps_taken++;
+
+        /* Parse the JSON response — check for reply, action, or answer */
+        char * reply = json_extract_string(gen.text, "reply");
+        char * thought = json_extract_string(gen.text, "thought");
+        char * answer = json_extract_string(gen.text, "answer");
+        char * action = json_extract_string(gen.text, "action");
+        char * args = json_extract_object(gen.text, "args");
+
+        /* ---- Direct reply path (new: conversational response) ---- */
+        if (reply) {
+            char * unescaped = json_unescape(reply);
+            if (on_step) {
+                on_step(step, NULL, "reply", unescaped ? unescaped : reply, user_data);
+            }
+
+            /* Add assistant reply to conversation history */
+            conv_history_push(agent, "assistant", unescaped ? unescaped : reply);
+
+            result.text = unescaped ? unescaped : strdup(reply);
+            if (unescaped) free(reply); else result.text = reply;
+            result.steps_taken = steps_taken;
+            result.total_ms = get_time_ms() - t_start;
+            result.status = NEURONOS_OK;
+
+            free(thought);
+            free(answer);
+            free(action);
+            free(args);
+            neuronos_gen_result_free(&gen);
+            goto cleanup;
+        }
+
+        /* ---- Final answer path (after tool use) ---- */
+        if (answer) {
+            char * unescaped = json_unescape(answer);
+            if (on_step) {
+                on_step(step, thought, "final_answer",
+                        unescaped ? unescaped : answer, user_data);
+            }
+
+            /* Add answer to conversation history */
+            conv_history_push(agent, "assistant", unescaped ? unescaped : answer);
+
+            result.text = unescaped ? unescaped : strdup(answer);
+            if (unescaped) free(answer); else result.text = answer;
+            result.steps_taken = steps_taken;
+            result.total_ms = get_time_ms() - t_start;
+            result.status = NEURONOS_OK;
+
+            free(reply);
+            free(thought);
+            free(action);
+            free(args);
+            neuronos_gen_result_free(&gen);
+            goto cleanup;
+        }
+
+        /* ---- Tool call path ---- */
+        if (action && agent->tools) {
+            step_outputs[step] = strdup(gen.text);
+            step_actions[step] = strdup(action);
+
+            if (on_step) {
+                on_step(step, thought, action, NULL, user_data);
+            }
+
+            if (agent->params.verbose) {
+                fprintf(stderr, "[neuronos] Tool: %s(%s)\n", action, args ? args : "{}");
+            }
+
+            neuronos_tool_result_t tool_result = neuronos_tool_execute(
+                agent->tools, action, args ? args : "{}");
+
+            const char * obs = tool_result.success
+                ? tool_result.output
+                : (tool_result.error ? tool_result.error : "Tool execution failed");
+
+            step_observations[step] = strdup(obs);
+
+            if (on_step) {
+                on_step(step, NULL, action, obs, user_data);
+            }
+
+            if (agent->params.verbose) {
+                fprintf(stderr, "[neuronos] Observation: %.200s%s\n",
+                        obs, strlen(obs) > 200 ? "..." : "");
+            }
+
+            neuronos_tool_result_free(&tool_result);
+        } else {
+            /* No reply, no answer, no action — model confused */
+            step_outputs[step] = strdup(gen.text);
+            step_observations[step] = strdup(
+                "Error: respond with {\"reply\": \"...\"} to chat, "
+                "or {\"thought\": \"...\", \"action\": \"...\", \"args\": {...}} to use a tool.");
+            step_actions[step] = strdup("error");
+        }
+
+        free(reply);
+        free(thought);
+        free(answer);
+        free(action);
+        free(args);
+        neuronos_gen_result_free(&gen);
+    }
+
+    /* Max steps reached without final response */
+    if (result.status != NEURONOS_OK) {
+        if (steps_taken >= max_steps) {
+            result.status = NEURONOS_ERROR_MAX_STEPS;
+        }
+        /* Provide fallback text */
+        result.text = strdup("I wasn't able to complete that task within the step limit. "
+                             "Please try rephrasing your request.");
+        conv_history_push(agent, "assistant", result.text);
+    }
+    result.steps_taken = steps_taken;
+    result.total_ms = get_time_ms() - t_start;
+
+cleanup:
+    /* Log final response to recall memory */
+    if (agent->memory && result.text) {
+        neuronos_memory_recall_add(agent->memory, agent->session_id,
+                                   "assistant", result.text, (int)(strlen(result.text) / 4));
+    }
+
+    /* Free turn-local step history */
+    for (int i = 0; i < max_steps; i++) {
+        free((void *)step_outputs[i]);
+        free((void *)step_actions[i]);
+        free((void *)step_observations[i]);
+    }
+    free(step_outputs);
+    free(step_actions);
+    free(step_observations);
+    free(enriched_prompt);
+
+    return result;
 }
 
 /* ============================================================

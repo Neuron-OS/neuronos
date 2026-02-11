@@ -22,9 +22,9 @@ extern "C" {
 
 /* ---- Version ---- */
 #define NEURONOS_VERSION_MAJOR 0
-#define NEURONOS_VERSION_MINOR 8
-#define NEURONOS_VERSION_PATCH 1
-#define NEURONOS_VERSION_STRING "0.8.1"
+#define NEURONOS_VERSION_MINOR 9
+#define NEURONOS_VERSION_PATCH 0
+#define NEURONOS_VERSION_STRING "0.9.0"
 
 /* ---- Opaque types ---- */
 typedef struct neuronos_engine neuronos_engine_t;
@@ -268,9 +268,28 @@ void neuronos_agent_free(neuronos_agent_t * agent);
  * The agent does NOT own the memory — caller must close it after agent_free(). */
 void neuronos_agent_set_memory(neuronos_agent_t * agent, neuronos_memory_t * mem);
 
-/* Run the agent on a user query */
+/* Run the agent on a user query (one-shot: full ReAct loop) */
 neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char * user_input,
                                            neuronos_agent_step_cb on_step, void * user_data);
+
+/* Interactive agent chat: multi-turn conversational agent.
+ *
+ * Unlike agent_run(), this maintains conversation history across calls.
+ * The model decides autonomously whether to:
+ *   - Reply directly (conversation, greetings, knowledge questions)
+ *   - Use tools (when it needs to take action or gather information)
+ *   - Provide a final answer (after tool results)
+ *
+ * The on_step callback fires for each internal tool-use step,
+ * enabling transparent display of agent reasoning.
+ *
+ * Conversation history is stored in the agent and persists across calls.
+ * Call neuronos_agent_clear_history() to reset. */
+neuronos_agent_result_t neuronos_agent_chat(neuronos_agent_t * agent, const char * user_input,
+                                            neuronos_agent_step_cb on_step, void * user_data);
+
+/* Clear the agent's conversation history (reset multi-turn state) */
+void neuronos_agent_clear_history(neuronos_agent_t * agent);
 
 void neuronos_agent_result_free(neuronos_agent_result_t * result);
 
