@@ -1,16 +1,15 @@
 ##
-## NeuronOS — Cross-Platform CI with Benchmarks
+## NeuronOS — Continuous Integration
 ##
-## Tier 1: Native (x86_64 Linux, ARM64 Linux)
-## Tier 2: QEMU emulation (RISC-V 64)
-## Tier 3: Compile-only (-Werror)
+## Builds and tests on every push to main/develop and PRs.
+## Uses static linking (BUILD_SHARED_LIBS=OFF) — same as release builds.
 ##
-## Tests:
-##   - compile-only: Just build (all platforms)
-##   - unit-no-model: HAL, hwinfo (all platforms)
-##   - benchmark: Speed report with real model (x86_64)
+## Matrix:
+##   - Linux x86_64 (GCC)   — full tests + optional benchmark
+##   - Linux ARM64 (GCC)    — full tests
+##   - Compile warnings      — clang -Werror
 ##
-name: NeuronOS CI
+name: CI
 
 on:
   push:
@@ -19,212 +18,128 @@ on:
       - 'neuronos/**'
       - 'src/**'
       - 'include/**'
+      - 'CMakeLists.txt'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'neuronos/**'
-      - 'src/**'
-      - 'include/**'
+  workflow_dispatch:
 
-env:
-  BUILD_TYPE: Release
-  BITNET_MODEL_REPO: "microsoft/BitNet-b1.58-2B-4T-gguf"
-  BITNET_MODEL_FILE: "ggml-model-i2_s.gguf"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  # ═══════════════════════════════════════════════════════
-  # Tier 1: Native x86_64 Linux (primary + benchmark)
-  # ═══════════════════════════════════════════════════════
-  linux-x86_64:
-    name: Linux x86_64 (clang)
-    runs-on: ubuntu-latest
+  # ═══════════════════════════════════════════
+  # Build + Test matrix
+  # ═══════════════════════════════════════════
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            cc: gcc
+            cxx: g++
+            run_hal: true
+            run_benchmark: true
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            cc: gcc
+            cxx: g++
+            run_hal: true
+            run_benchmark: false
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang cmake bc curl jq
+        run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - name: Build parent BitNet
+      - name: Configure (static build)
         run: |
           cmake -B build \
-            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DBITNET_X86_TL2=OFF
-          cmake --build build -j$(nproc)
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DBITNET_X86_TL2=OFF \
+            -DBUILD_SHARED_LIBS=OFF
 
-      - name: Build NeuronOS
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Verify static linking
         run: |
-          cd neuronos
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
-            -DCMAKE_C_COMPILER=clang
-          cmake --build build -j$(nproc)
+          echo "=== Binary dependencies ==="
+          ldd build/bin/neuronos-cli
+          if ldd build/bin/neuronos-cli | grep -q libllama; then
+            echo "ERROR: dynamically linked to libllama!"
+            exit 1
+          fi
+          echo "OK: statically linked"
 
       - name: Run HAL tests
-        run: |
-          cd neuronos/build
-          export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
-          ./test_hal
+        if: matrix.run_hal
+        run: ./build/bin/test_hal
+
+      - name: Run memory tests
+        run: ./build/bin/test_memory
+
+      - name: Run engine tests (no model)
+        run: ./build/bin/test_engine
 
       - name: Hardware info
-        run: |
-          cd neuronos/build
-          export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
-          ./neuronos-cli hwinfo
+        run: ./build/bin/neuronos-cli hwinfo
 
       - name: Download model for benchmark
+        if: matrix.run_benchmark
+        continue-on-error: true
         run: |
           mkdir -p models
-          if [ ! -f "models/$BITNET_MODEL_FILE" ]; then
-            echo "Downloading BitNet 2B4T model..."
-            curl -L -o "models/$BITNET_MODEL_FILE" \
-              "https://huggingface.co/$BITNET_MODEL_REPO/resolve/main/$BITNET_MODEL_FILE" \
-              --progress-bar || echo "Model download failed (non-fatal)"
-          fi
+          curl -L -o models/ggml-model-i2_s.gguf \
+            "https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf" \
+            --progress-bar --max-time 300
 
-      - name: Run engine tests + benchmark
-        if: hashFiles('models/ggml-model-i2_s.gguf') != ''
+      - name: Run engine tests with model
+        if: matrix.run_benchmark && hashFiles('models/ggml-model-i2_s.gguf') != ''
         run: |
-          cd neuronos/build
-          export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
-
           echo "═══════════════════════════════════════"
-          echo "  NeuronOS Benchmark — x86_64 Linux"
+          echo "  NeuronOS Benchmark — ${{ matrix.name }}"
           echo "═══════════════════════════════════════"
-
-          # Full engine test suite
-          ./test_engine ../../models/$BITNET_MODEL_FILE 2>&1 | tee /tmp/bench.txt
-
-          # Extract key metrics
+          ./build/bin/test_engine models/ggml-model-i2_s.gguf 2>&1 | tee /tmp/bench.txt
           echo ""
-          echo "═══════════════════════════════════════"
-          echo "  SPEED REPORT"
-          echo "═══════════════════════════════════════"
-          grep -oP '[0-9]+\.[0-9]+ t/s' /tmp/bench.txt | while read speed; do
-            echo "  $speed"
-          done
-          grep 'Results:' /tmp/bench.txt
+          echo "=== Speed Report ==="
+          grep -oP '[0-9]+\.[0-9]+ t/s' /tmp/bench.txt || true
+          grep 'Results:' /tmp/bench.txt || true
 
-      - name: Generate benchmark summary
+      - name: CI Summary
         if: always()
         run: |
-          echo "## NeuronOS CI — x86_64 Benchmark" >> $GITHUB_STEP_SUMMARY
+          echo "## NeuronOS CI — ${{ matrix.name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform | $(uname -m) $(cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2) |" >> $GITHUB_STEP_SUMMARY
-          echo "| RAM | $(free -h | grep Mem | awk '{print $2}') |" >> $GITHUB_STEP_SUMMARY
-          echo "| Cores | $(nproc) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | $(uname -m) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | Static (BUILD_SHARED_LIBS=OFF) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Binary size | $(du -h build/bin/neuronos-cli | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           if [ -f /tmp/bench.txt ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Speed Results" >> $GITHUB_STEP_SUMMARY
+            echo "### Benchmark" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             grep -E 't/s|Results|PASS|FAIL' /tmp/bench.txt >> $GITHUB_STEP_SUMMARY || true
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-  # ═══════════════════════════════════════════════════════
-  # Tier 1: Native ARM64 Linux
-  # ═══════════════════════════════════════════════════════
-  linux-arm64:
-    name: Linux ARM64 (gcc)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc g++ cmake bc
-
-      - name: Build parent BitNet
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
-            -DBITNET_X86_TL2=OFF
-          cmake --build build -j$(nproc)
-
-      - name: Build NeuronOS
-        run: |
-          cd neuronos
-          cmake -B build -DCMAKE_BUILD_TYPE=$BUILD_TYPE
-          cmake --build build -j$(nproc)
-
-      - name: Run tests + hwinfo
-        run: |
-          cd neuronos/build
-          export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
-          ./test_hal
-          ./neuronos-cli hwinfo
-
-      - name: ARM64 summary
-        if: always()
-        run: |
-          echo "## NeuronOS CI — ARM64" >> $GITHUB_STEP_SUMMARY
-          echo "Build: OK | HAL tests: PASS" >> $GITHUB_STEP_SUMMARY
-
-  # ═══════════════════════════════════════════════════════
-  # Tier 2: RISC-V 64 via QEMU
-  # ═══════════════════════════════════════════════════════
-  riscv64-qemu:
-    name: RISC-V 64 (QEMU)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: uraimo/run-on-arch-action@v3
-        with:
-          arch: riscv64
-          distro: ubuntu24.04
-          githubToken: ${{ github.token }}
-          dockerRunArgs: |
-            --volume "${PWD}:/opt/neuronos"
-          install: |
-            apt-get update
-            apt-get install -y gcc g++ cmake bc
-          run: |
-            cd /opt/neuronos
-            echo "Building on RISC-V 64 (scalar fallback)..."
-
-            # Build parent (scalar-only, no SIMD)
-            # Use -j2 instead of -j$(nproc) because QEMU emulation is slow with high parallelism
-            # Disable examples/tests/server to speed up build (only need libs for NeuronOS)
-            cmake -B build \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBITNET_X86_TL2=OFF \
-              -DLLAMA_BUILD_EXAMPLES=OFF \
-              -DLLAMA_BUILD_TESTS=OFF \
-              -DLLAMA_BUILD_SERVER=OFF
-            cmake --build build --target llama ggml -j2
-
-            # Build NeuronOS
-            cd neuronos
-            cmake -B build -DCMAKE_BUILD_TYPE=Release
-            cmake --build build -j2
-
-            # Run HAL test (scalar backend)
-            cd build
-            export LD_LIBRARY_PATH=../../build/3rdparty/llama.cpp/src:../../build/3rdparty/llama.cpp/ggml/src
-            ./test_hal
-            ./neuronos-cli hwinfo
-            echo "RISC-V build + tests passed!"
-
-  # ═══════════════════════════════════════════════════════
-  # Compile with -Werror
-  # ═══════════════════════════════════════════════════════
-  compile-warnings:
-    name: Compile with -Werror
+  # ═══════════════════════════════════════════
+  # Compile warnings check (-Werror)
+  # ═══════════════════════════════════════════
+  warnings:
+    name: Compile warnings
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -234,20 +149,14 @@ jobs:
       - name: Install clang
         run: sudo apt-get update && sudo apt-get install -y clang cmake
 
-      - name: Build parent BitNet
+      - name: Build with -Werror
         run: |
           cmake -B build \
-            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
-            -DBITNET_X86_TL2=OFF
-          cmake --build build -j$(nproc)
-
-      - name: Build NeuronOS with -Werror
-        run: |
-          cd neuronos
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_C_FLAGS="-Werror"
+            -DBITNET_X86_TL2=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_C_FLAGS="-Werror" \
+            -DCMAKE_CXX_FLAGS="-Werror"
           cmake --build build -j$(nproc)

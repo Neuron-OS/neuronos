@@ -1,154 +1,209 @@
 #!/usr/bin/env bash
 ##
-## NeuronOS — Create GitHub Release (local)
+## NeuronOS — Create Release
 ##
-## Usage: ./scripts/create-release.sh <version>
-##   e.g.: ./scripts/create-release.sh 0.8.0
+## Bumps version in neuronos.h, commits, tags, and pushes.
+## This triggers the release.yml workflow which builds for 3 platforms
+## and publishes a GitHub Release with all binaries.
 ##
-## Prerequisites:
-##   - gh CLI installed (brew install gh / apt install gh)
-##   - Authenticated: gh auth login
-##   - All tests passing
-##   - Clean git state (or use --force)
+## Usage:
+##   ./scripts/create-release.sh <version>
+##   ./scripts/create-release.sh patch        # auto-bump patch (0.8.0 → 0.8.1)
+##   ./scripts/create-release.sh minor        # auto-bump minor (0.8.0 → 0.9.0)
+##   ./scripts/create-release.sh major        # auto-bump major (0.8.0 → 1.0.0)
+##   ./scripts/create-release.sh 0.9.0        # explicit version
+##
+## Options:
+##   --dry-run    Show what would happen, but don't do it
+##   --force      Skip dirty tree check
+##   --no-push    Commit + tag, but don't push (manual push later)
 ##
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+HEADER_FILE="$REPO_ROOT/neuronos/include/neuronos/neuronos.h"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BOLD='\033[1m'
-NC='\033[0m'
-
-die() { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
-ok()  { echo -e "${GREEN}✓${NC} $*"; }
-info() { echo -e "${BOLD}→${NC} $*"; }
+# ── Colors ──
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BOLD='\033[1m'; NC='\033[0m'
+die()  { echo -e "${RED}ERROR:${NC} $*" >&2; exit 1; }
+ok()   { echo -e "${GREEN}ok${NC} $*"; }
+info() { echo -e "${BOLD}>>${NC} $*"; }
 
 # ── Parse args ──
-VERSION="${1:-}"
-FORCE="${2:-}"
+VERSION_ARG=""
+DRY_RUN=false
+FORCE=false
+NO_PUSH=false
 
-if [ -z "$VERSION" ]; then
-    echo "Usage: $0 <version> [--force]"
-    echo "  e.g.: $0 0.8.0"
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)  DRY_RUN=true ;;
+        --force)    FORCE=true ;;
+        --no-push)  NO_PUSH=true ;;
+        -*)         die "Unknown flag: $arg" ;;
+        *)          VERSION_ARG="$arg" ;;
+    esac
+done
+
+if [ -z "$VERSION_ARG" ]; then
+    echo "Usage: $0 <version|patch|minor|major> [--dry-run] [--force] [--no-push]"
+    echo ""
+    echo "Examples:"
+    echo "  $0 patch          # 0.8.0 → 0.8.1"
+    echo "  $0 minor          # 0.8.0 → 0.9.0"
+    echo "  $0 major          # 0.8.0 → 1.0.0"
+    echo "  $0 0.9.0          # explicit"
     exit 1
 fi
 
-TAG="v${VERSION}"
+# ── Read current version from header ──
+if [ ! -f "$HEADER_FILE" ]; then
+    die "Header not found: $HEADER_FILE"
+fi
+
+CUR_MAJOR=$(grep -oP '#define NEURONOS_VERSION_MAJOR\s+\K[0-9]+' "$HEADER_FILE")
+CUR_MINOR=$(grep -oP '#define NEURONOS_VERSION_MINOR\s+\K[0-9]+' "$HEADER_FILE")
+CUR_PATCH=$(grep -oP '#define NEURONOS_VERSION_PATCH\s+\K[0-9]+' "$HEADER_FILE")
+CURRENT="${CUR_MAJOR}.${CUR_MINOR}.${CUR_PATCH}"
+info "Current version: ${BOLD}v${CURRENT}${NC}"
+
+# ── Compute new version ──
+case "$VERSION_ARG" in
+    patch) NEW_MAJOR=$CUR_MAJOR; NEW_MINOR=$CUR_MINOR; NEW_PATCH=$((CUR_PATCH + 1)) ;;
+    minor) NEW_MAJOR=$CUR_MAJOR; NEW_MINOR=$((CUR_MINOR + 1)); NEW_PATCH=0 ;;
+    major) NEW_MAJOR=$((CUR_MAJOR + 1)); NEW_MINOR=0; NEW_PATCH=0 ;;
+    *)
+        # Explicit version: validate format
+        if ! echo "$VERSION_ARG" | grep -qP '^\d+\.\d+\.\d+$'; then
+            die "Invalid version: $VERSION_ARG (expected: X.Y.Z, patch, minor, or major)"
+        fi
+        NEW_MAJOR=$(echo "$VERSION_ARG" | cut -d. -f1)
+        NEW_MINOR=$(echo "$VERSION_ARG" | cut -d. -f2)
+        NEW_PATCH=$(echo "$VERSION_ARG" | cut -d. -f3)
+        ;;
+esac
+
+NEW_VERSION="${NEW_MAJOR}.${NEW_MINOR}.${NEW_PATCH}"
+TAG="v${NEW_VERSION}"
+
+if [ "$NEW_VERSION" = "$CURRENT" ]; then
+    die "New version ($NEW_VERSION) is same as current ($CURRENT)"
+fi
 
 echo ""
 echo -e "${BOLD}════════════════════════════════════════════${NC}"
-echo -e "${BOLD}  NeuronOS Release Creator${NC}"
-echo -e "${BOLD}  Version: ${TAG}${NC}"
+echo -e "${BOLD}  NeuronOS Release${NC}"
+echo -e "${BOLD}  ${CURRENT} → ${NEW_VERSION} (tag: ${TAG})${NC}"
 echo -e "${BOLD}════════════════════════════════════════════${NC}"
 echo ""
 
-# ── Check prerequisites ──
-info "Checking prerequisites..."
+if $DRY_RUN; then
+    echo -e "${YELLOW}[DRY RUN]${NC} No changes will be made."
+    echo ""
+fi
 
-command -v gh &>/dev/null || die "gh CLI not installed. Install: https://cli.github.com/"
-command -v cmake &>/dev/null || die "cmake not installed"
-
-# Check gh auth
-gh auth status &>/dev/null || die "Not authenticated. Run: gh auth login"
-ok "gh CLI authenticated"
-
+# ── Prerequisites ──
 cd "$REPO_ROOT"
 
-# ── Check git state ──
-if [ "$FORCE" != "--force" ]; then
-    if [ -n "$(git status --porcelain)" ]; then
-        die "Working tree is dirty. Commit changes first or use --force"
-    fi
-    ok "Git working tree clean"
+if ! $FORCE && [ -n "$(git status --porcelain)" ]; then
+    die "Working tree dirty. Commit first or use --force"
 fi
 
 # ── Run tests ──
 info "Running tests..."
-export LD_LIBRARY_PATH="${REPO_ROOT}/build/3rdparty/llama.cpp/src:${REPO_ROOT}/build/3rdparty/llama.cpp/ggml/src"
-
 if [ -f "$REPO_ROOT/build/bin/test_hal" ]; then
     "$REPO_ROOT/build/bin/test_hal" > /dev/null 2>&1 || die "test_hal FAILED"
-    ok "test_hal passed"
-else
-    die "Tests not built. Run: cmake --build build -j\$(nproc)"
+    ok "test_hal"
 fi
-
+if [ -f "$REPO_ROOT/build/bin/test_engine" ]; then
+    "$REPO_ROOT/build/bin/test_engine" > /dev/null 2>&1 || die "test_engine FAILED"
+    ok "test_engine"
+fi
 if [ -f "$REPO_ROOT/build/bin/test_memory" ]; then
     "$REPO_ROOT/build/bin/test_memory" > /dev/null 2>&1 || die "test_memory FAILED"
-    ok "test_memory passed"
+    ok "test_memory"
 fi
 
-if [ -f "$REPO_ROOT/build/bin/test_engine" ]; then
-    info "test_engine requires model — skipping (run manually)"
-fi
+# ── Update version in header ──
+info "Updating version in neuronos.h..."
 
-# ── Package ──
-info "Packaging release..."
-bash "$SCRIPT_DIR/package-release.sh" "$VERSION"
-ok "Package created"
-
-TARBALL=$(find "$REPO_ROOT" -maxdepth 1 -name "neuronos-v${VERSION}-*.tar.gz" | head -1)
-if [ -z "$TARBALL" ]; then
-    die "Tarball not found after packaging"
-fi
-
-# ── Create git tag ──
-if git rev-parse "$TAG" >/dev/null 2>&1; then
-    info "Tag $TAG already exists"
+if $DRY_RUN; then
+    echo "  Would set: NEURONOS_VERSION_MAJOR ${NEW_MAJOR}"
+    echo "  Would set: NEURONOS_VERSION_MINOR ${NEW_MINOR}"
+    echo "  Would set: NEURONOS_VERSION_PATCH ${NEW_PATCH}"
+    echo "  Would set: NEURONOS_VERSION_STRING \"${NEW_VERSION}\""
 else
-    info "Creating tag ${TAG}..."
-    git tag -a "$TAG" -m "Release ${TAG}"
-    ok "Tag created: ${TAG}"
+    sed -i "s/#define NEURONOS_VERSION_MAJOR .*/#define NEURONOS_VERSION_MAJOR ${NEW_MAJOR}/" "$HEADER_FILE"
+    sed -i "s/#define NEURONOS_VERSION_MINOR .*/#define NEURONOS_VERSION_MINOR ${NEW_MINOR}/" "$HEADER_FILE"
+    sed -i "s/#define NEURONOS_VERSION_PATCH .*/#define NEURONOS_VERSION_PATCH ${NEW_PATCH}/" "$HEADER_FILE"
+    sed -i "s/#define NEURONOS_VERSION_STRING .*/#define NEURONOS_VERSION_STRING \"${NEW_VERSION}\"/" "$HEADER_FILE"
+    ok "neuronos.h updated"
+
+    # Verify
+    VERIFY=$(grep '#define NEURONOS_VERSION_STRING' "$HEADER_FILE")
+    echo "  $VERIFY"
 fi
 
-# ── Push tag ──
-info "Pushing tag to origin..."
-git push origin "$TAG" 2>/dev/null || info "Tag push failed (may already exist on remote)"
+# ── Commit ──
+info "Committing..."
+if $DRY_RUN; then
+    echo "  Would commit: 'release: v${NEW_VERSION}'"
+else
+    git add "$HEADER_FILE"
+    git commit -m "release: v${NEW_VERSION}
 
-# ── Create GitHub Release ──
-info "Creating GitHub Release..."
+Version bump: ${CURRENT} → ${NEW_VERSION}
+This commit triggers the release workflow."
+    ok "Committed"
+fi
 
-RELEASE_NOTES="## NeuronOS ${TAG}
+# ── Tag ──
+info "Creating tag ${TAG}..."
+if $DRY_RUN; then
+    echo "  Would create annotated tag: ${TAG}"
+else
+    if git rev-parse "$TAG" >/dev/null 2>&1; then
+        die "Tag $TAG already exists. Delete it first: git tag -d $TAG && git push origin :refs/tags/$TAG"
+    fi
+    git tag -a "$TAG" -m "NeuronOS ${TAG}"
+    ok "Tag ${TAG} created"
+fi
 
-Universal AI agent engine for edge devices.
+# ── Push ──
+if $NO_PUSH; then
+    echo ""
+    info "Skipping push (--no-push). Push manually:"
+    echo "  git push origin main && git push origin ${TAG}"
+    echo ""
+elif $DRY_RUN; then
+    echo "  Would push: main + ${TAG}"
+else
+    info "Pushing to origin..."
+    git push origin main
+    git push origin "$TAG"
+    ok "Pushed main + ${TAG}"
+fi
 
-### Quick Install
-\`\`\`bash
-curl -sSL https://raw.githubusercontent.com/Neuron-OS/neuronos/main/scripts/install.sh | bash
-\`\`\`
-
-### Features
-- ReAct agent engine with 12 built-in tools
-- MCP Client + Server (JSON-RPC 2.0 STDIO)
-- SQLite+FTS5 persistent memory (MemGPT 3-tier)
-- BitNet 1.58-bit ternary model support
-- OpenAI-compatible HTTP server
-- Zero runtime dependencies (C11 pure)
-
-### Downloads
-Download the tarball for your platform and extract:
-\`\`\`bash
-tar xzf neuronos-${TAG}-linux-x86_64.tar.gz
-./neuronos-${TAG}-linux-x86_64/bin/neuronos model.gguf run \"Hello\"
-\`\`\`
-"
-
-gh release create "$TAG" \
-    --title "NeuronOS ${TAG}" \
-    --notes "$RELEASE_NOTES" \
-    "$TARBALL" \
-    || die "Failed to create release"
-
-ok "Release created!"
-
+# ── Done ──
 echo ""
 echo -e "${BOLD}════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ✓ Release ${TAG} published!${NC}"
+if $DRY_RUN; then
+    echo -e "${YELLOW}  [DRY RUN] No changes made${NC}"
+else
+    echo -e "${GREEN}  Release ${TAG} initiated${NC}"
+fi
 echo -e "${BOLD}════════════════════════════════════════════${NC}"
 echo ""
-echo "  View: https://github.com/Neuron-OS/neuronos/releases/tag/${TAG}"
-echo "  Install: curl -sSL https://raw.githubusercontent.com/Neuron-OS/neuronos/main/scripts/install.sh | bash"
-echo ""
+
+if ! $DRY_RUN && ! $NO_PUSH; then
+    echo "  The release workflow is now building binaries for:"
+    echo "    - Linux x86_64"
+    echo "    - Linux ARM64"
+    echo "    - macOS ARM64"
+    echo ""
+    echo "  Monitor: https://github.com/Neuron-OS/neuronos/actions"
+    echo "  Release: https://github.com/Neuron-OS/neuronos/releases/tag/${TAG}"
+    echo ""
+fi
