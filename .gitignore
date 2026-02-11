@@ -49,3 +49,5 @@ logs/cuda_*.run
 cuda_*.run
 *.run
 neuronos-v*.tar.gz
+neuronos/wasm/build-wasm-*/
+neuronos/wasm/dist/
