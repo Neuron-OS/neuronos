@@ -121,6 +121,7 @@ typedef struct {
     char body[MAX_REQUEST];
     int body_len;
     int content_length;
+    bool accept_gzip;
 } http_request_t;
 
 static int parse_request(const char * raw, int raw_len, http_request_t * req) {
@@ -132,6 +133,18 @@ static int parse_request(const char * raw, int raw_len, http_request_t * req) {
         return -1;
 
     sscanf(raw, "%15s %255s", req->method, req->path);
+
+    /* Detect Accept-Encoding: gzip */
+    const char * ae = strstr(raw, "Accept-Encoding:");
+    if (!ae) ae = strstr(raw, "accept-encoding:");
+    if (ae) {
+        const char * ae_end = strstr(ae, "\r\n");
+        if (ae_end) {
+            /* Search within this header line */
+            const char * gz = strstr(ae, "gzip");
+            if (gz && gz < ae_end) req->accept_gzip = true;
+        }
+    }
 
     /* Find Content-Length */
     const char * cl = strstr(raw, "Content-Length:");
@@ -180,6 +193,24 @@ static void send_response(socket_t sock, int status_code, const char * status_te
 
 static void send_json(socket_t sock, int status, const char * json) {
     send_response(sock, status, status == 200 ? "OK" : "Error", "application/json", json, (int)strlen(json));
+}
+
+/* Send a gzip-compressed response (browser decompresses automatically) */
+static void send_gzip_response(socket_t sock, const char * content_type,
+                               const unsigned char * data, int data_len) {
+    char header[512];
+    int hlen = snprintf(header, sizeof(header),
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: %s\r\n"
+                        "Content-Encoding: gzip\r\n"
+                        "Content-Length: %d\r\n"
+                        "Cache-Control: no-cache\r\n"
+                        "Access-Control-Allow-Origin: *\r\n"
+                        "Connection: close\r\n"
+                        "\r\n",
+                        content_type, data_len);
+    send(sock, header, hlen, 0);
+    send(sock, (const char *)data, data_len, 0);
 }
 
 /* ---- Extract simple JSON string value ---- */
@@ -691,26 +722,26 @@ static void handle_chat_completions(socket_t sock, const char * body) {
     free_parsed_msgs(parsed, msg_count);
 }
 
-static void handle_root(socket_t sock) {
-    if (g_agent) {
-        /* Agent mode: serve embedded chat UI */
-        send_response(sock, 200, "OK", "text/html; charset=utf-8",
-                      NEURONOS_CHAT_UI_HTML, (int)strlen(NEURONOS_CHAT_UI_HTML));
+static void handle_root(socket_t sock, bool accept_gzip) {
+#if NEURONOS_CHAT_UI_IS_GZIPPED
+    if (accept_gzip) {
+        /* Serve gzip-compressed embedded Chat UI */
+        send_gzip_response(sock, "text/html; charset=utf-8",
+                           neuronos_chat_ui_html_gz, (int)neuronos_chat_ui_html_gz_len);
         return;
     }
-    const char * html = "<!DOCTYPE html><html><head><title>NeuronOS</title>"
-                        "<style>body{font-family:monospace;background:#0a0a0a;color:#0f0;padding:40px}"
-                        "h1{color:#0ff}pre{color:#aaa}</style></head><body>"
+    /* Fallback: browser doesn't support gzip — serve a redirect hint */
+    const char * html = "<!DOCTYPE html><html><head><title>NeuronOS</title></head><body>"
                         "<h1>NeuronOS v" NEURONOS_VERSION_STRING "</h1>"
-                        "<p>AI agent engine. Universal. Offline. Any device.</p>"
-                        "<pre>Endpoints:\n"
-                        "  POST /v1/chat/completions  - Chat API (OpenAI compatible, SSE streaming)\n"
-                        "  POST /v1/completions       - Text completion\n"
-                        "  GET  /v1/models            - List models\n"
-                        "  GET  /health               - Health check\n"
-                        "\nStreaming: Set \"stream\": true for SSE token streaming\n"
-                        "</pre></body></html>";
-    send_response(sock, 200, "OK", "text/html", html, (int)strlen(html));
+                        "<p>Your browser needs gzip support for the Chat UI.</p>"
+                        "<p>Use a modern browser (Chrome, Firefox, Safari, Edge).</p>"
+                        "</body></html>";
+    send_response(sock, 200, "OK", "text/html; charset=utf-8", html, (int)strlen(html));
+#else
+    /* Non-gzipped embedded Chat UI */
+    send_response(sock, 200, "OK", "text/html; charset=utf-8",
+                  (const char *)neuronos_chat_ui_html, (int)neuronos_chat_ui_html_len);
+#endif
 }
 
 /* ---- Agent SSE Chat Endpoint ---- */
@@ -923,7 +954,7 @@ neuronos_status_t neuronos_server_start(neuronos_model_t * model, neuronos_tool_
                 } else if (strcmp(req.path, "/api/chat") == 0 && strcmp(req.method, "POST") == 0) {
                     handle_agent_chat(client_fd, req.body);
                 } else if (strcmp(req.path, "/") == 0) {
-                    handle_root(client_fd);
+                    handle_root(client_fd, req.accept_gzip);
                 } else {
                     send_json(client_fd, 404, "{\"error\":{\"message\":\"Not found\"}}");
                 }

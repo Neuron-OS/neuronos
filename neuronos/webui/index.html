@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>NeuronOS</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<style>
+/* ═══════════════════════════════════════════════════════════
+   NeuronOS Chat UI — Premium Vanilla CSS
+   Dark theme · Monospace · Agent-first design
+   ═══════════════════════════════════════════════════════════ */
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+
+:root {
+  --bg:        #09090b;
+  --surface:   #0f0f13;
+  --surface2:  #16161d;
+  --border:    #1e1e2a;
+  --border2:   #2a2a3a;
+  --text:      #e4e4e7;
+  --text-dim:  #71717a;
+  --text-muted:#52525b;
+  --accent:    #06b6d4;
+  --accent-dim:#0e7490;
+  --accent-bg: rgba(6,182,212,0.08);
+  --user-bg:   #172554;
+  --user-border:#1e3a5f;
+  --bot-bg:    #111118;
+  --bot-border:#1c1c2e;
+  --green:     #22c55e;
+  --yellow:    #eab308;
+  --red:       #ef4444;
+  --orange:    #f97316;
+  --purple:    #a855f7;
+  --radius:    12px;
+  --radius-sm: 8px;
+  --font-mono: 'SF Mono','JetBrains Mono','Fira Code','Cascadia Code','Consolas',monospace;
+  --font-sans: 'Inter','SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --shadow:    0 1px 3px rgba(0,0,0,0.4);
+  --transition:150ms cubic-bezier(0.4,0,0.2,1);
+}
+
+html,body {
+  height:100%;font-family:var(--font-sans);background:var(--bg);
+  color:var(--text);overflow:hidden;-webkit-font-smoothing:antialiased;
+}
+
+body {display:flex;flex-direction:column}
+
+/* ─── Header ─── */
+.header {
+  display:flex;align-items:center;gap:12px;
+  padding:12px 20px;background:var(--surface);
+  border-bottom:1px solid var(--border);flex-shrink:0;
+  z-index:10;
+}
+.header-logo {
+  display:flex;align-items:center;gap:8px;
+  font-weight:700;font-size:16px;letter-spacing:-0.02em;
+}
+.header-logo svg {width:20px;height:20px}
+.header-logo span {color:var(--accent)}
+.header-ver {
+  font-family:var(--font-mono);font-size:11px;
+  color:var(--text-muted);background:var(--surface2);
+  padding:2px 8px;border-radius:4px;
+}
+.header-right {
+  margin-left:auto;display:flex;align-items:center;gap:16px;
+}
+.header-status {
+  display:flex;align-items:center;gap:6px;
+  font-size:12px;color:var(--green);font-weight:500;
+}
+.header-status::before {
+  content:'';width:7px;height:7px;background:var(--green);
+  border-radius:50%;box-shadow:0 0 6px var(--green);
+}
+.header-status.offline {color:var(--red)}
+.header-status.offline::before {background:var(--red);box-shadow:0 0 6px var(--red)}
+
+.header-badge {
+  font-size:11px;color:var(--text-muted);
+  padding:2px 8px;border:1px solid var(--border);
+  border-radius:4px;font-family:var(--font-mono);
+}
+
+/* ─── Chat Area ─── */
+.chat {
+  flex:1;overflow-y:auto;overflow-x:hidden;
+  padding:0;scroll-behavior:smooth;
+}
+.chat-inner {
+  max-width:800px;margin:0 auto;padding:24px 20px 120px;
+  display:flex;flex-direction:column;gap:2px;
+}
+
+/* ─── Welcome Screen ─── */
+.welcome {
+  display:flex;flex-direction:column;align-items:center;
+  justify-content:center;text-align:center;
+  padding:80px 20px 40px;gap:16px;
+}
+.welcome-icon {font-size:48px;margin-bottom:8px}
+.welcome h2 {
+  font-size:24px;font-weight:700;letter-spacing:-0.03em;
+  background:linear-gradient(135deg,var(--accent),#a855f7);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+.welcome p {
+  color:var(--text-dim);font-size:14px;line-height:1.7;
+  max-width:480px;
+}
+.welcome-caps {
+  display:flex;flex-wrap:wrap;gap:8px;justify-content:center;
+  margin-top:8px;
+}
+.welcome-cap {
+  font-size:12px;font-weight:500;color:var(--text-dim);
+  padding:6px 14px;border-radius:20px;
+  background:var(--surface2);border:1px solid var(--border);
+  transition:all var(--transition);
+}
+.welcome-cap:hover {border-color:var(--accent-dim);color:var(--accent)}
+.welcome-examples {
+  margin-top:20px;display:flex;flex-direction:column;gap:8px;
+  width:100%;max-width:500px;
+}
+.welcome-example {
+  cursor:pointer;text-align:left;padding:12px 16px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius-sm);font-size:13px;color:var(--text-dim);
+  transition:all var(--transition);
+}
+.welcome-example:hover {
+  border-color:var(--border2);color:var(--text);
+  background:var(--surface2);
+}
+.welcome-example span {color:var(--text-muted);margin-right:8px}
+
+/* ─── Message Blocks ─── */
+.msg-group {
+  display:flex;flex-direction:column;gap:0;
+  padding:16px 0;
+}
+.msg-group + .msg-group {border-top:1px solid var(--border)}
+
+.msg-label {
+  font-size:12px;font-weight:600;text-transform:uppercase;
+  letter-spacing:0.05em;margin-bottom:8px;
+  display:flex;align-items:center;gap:6px;
+}
+.msg-label.user {color:var(--accent)}
+.msg-label.bot  {color:var(--purple)}
+.msg-label svg {width:14px;height:14px}
+
+.msg-body {
+  font-size:14px;line-height:1.75;color:var(--text);
+  overflow-wrap:break-word;word-wrap:break-word;
+}
+.msg-body p {margin-bottom:8px}
+.msg-body p:last-child {margin-bottom:0}
+
+/* Code blocks */
+.msg-body pre {
+  background:var(--surface2);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:14px 16px;
+  margin:10px 0;overflow-x:auto;font-size:13px;
+  font-family:var(--font-mono);line-height:1.5;
+  color:#d4d4d8;
+}
+.msg-body code {
+  font-family:var(--font-mono);font-size:0.9em;
+  background:var(--surface2);padding:2px 6px;
+  border-radius:4px;color:#d4d4d8;
+}
+.msg-body pre code {background:none;padding:0;border-radius:0}
+
+/* Bold, italic, links */
+.msg-body strong {font-weight:600;color:#f4f4f5}
+.msg-body em {font-style:italic;color:#a1a1aa}
+.msg-body a {color:var(--accent);text-decoration:none}
+.msg-body a:hover {text-decoration:underline}
+
+/* Lists */
+.msg-body ul,.msg-body ol {padding-left:20px;margin:8px 0}
+.msg-body li {margin:4px 0}
+
+/* ─── Agent Steps ─── */
+.steps {
+  margin-top:12px;display:flex;flex-direction:column;gap:6px;
+}
+.step {
+  font-size:12px;font-family:var(--font-mono);
+  padding:8px 12px;border-radius:var(--radius-sm);
+  border-left:3px solid;animation:stepIn 0.2s ease;
+}
+@keyframes stepIn {
+  from {opacity:0;transform:translateX(-4px)}
+  to   {opacity:1;transform:none}
+}
+.step-think {
+  background:rgba(234,179,8,0.06);border-color:var(--yellow);
+  color:var(--yellow);
+}
+.step-tool {
+  background:rgba(6,182,212,0.06);border-color:var(--accent);
+  color:var(--accent);
+}
+.step-obs {
+  background:var(--surface2);border-color:var(--border2);
+  color:var(--text-dim);font-size:11px;
+  max-height:120px;overflow-y:auto;white-space:pre-wrap;
+}
+
+/* ─── Live Status (during streaming) ─── */
+.live {
+  display:none;max-width:800px;margin:0 auto;
+  padding:4px 20px 8px;font-size:12px;
+  font-family:var(--font-mono);color:var(--text-muted);
+}
+.live.on {display:flex;align-items:center;gap:8px}
+.live-icon {
+  width:16px;height:16px;border:2px solid var(--accent);
+  border-top-color:transparent;border-radius:50%;
+  animation:spin 0.6s linear infinite;
+}
+@keyframes spin {to{transform:rotate(360deg)}}
+.live-text {color:var(--text-dim)}
+.live-text em {color:var(--accent);font-style:normal}
+
+/* ─── Typing Indicator ─── */
+.typing {
+  display:none;align-items:center;gap:5px;
+  padding:16px 0;max-width:800px;margin:0 auto;
+}
+.typing.on {display:flex}
+.typing-dot {
+  width:6px;height:6px;background:var(--accent);border-radius:50%;
+  animation:typingBounce 1.2s infinite;
+}
+.typing-dot:nth-child(2) {animation-delay:0.2s}
+.typing-dot:nth-child(3) {animation-delay:0.4s}
+@keyframes typingBounce {
+  0%,60%,100%{opacity:0.3;transform:translateY(0)}
+  30%{opacity:1;transform:translateY(-4px)}
+}
+
+/* ─── Input Area ─── */
+.input-area {
+  position:fixed;bottom:0;left:0;right:0;
+  background:linear-gradient(transparent,var(--bg) 20%);
+  padding:16px 20px 20px;z-index:10;
+}
+.input-box {
+  max-width:800px;margin:0 auto;position:relative;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:16px;transition:border-color var(--transition);
+  box-shadow:var(--shadow);
+}
+.input-box:focus-within {border-color:var(--accent-dim)}
+.input-box textarea {
+  width:100%;background:transparent;border:none;
+  color:var(--text);font-family:var(--font-sans);
+  font-size:14px;padding:14px 60px 14px 18px;
+  resize:none;outline:none;max-height:160px;
+  line-height:1.5;
+}
+.input-box textarea::placeholder {color:var(--text-muted)}
+
+.input-actions {
+  position:absolute;right:8px;bottom:8px;display:flex;gap:4px;
+}
+.btn-send {
+  width:36px;height:36px;border-radius:10px;border:none;
+  background:var(--accent);color:var(--bg);cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:all var(--transition);
+}
+.btn-send:hover {opacity:0.85;transform:scale(1.05)}
+.btn-send:disabled {opacity:0.25;cursor:not-allowed;transform:none}
+.btn-send svg {width:18px;height:18px}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar {width:6px}
+::-webkit-scrollbar-track {background:transparent}
+::-webkit-scrollbar-thumb {background:var(--border2);border-radius:3px}
+::-webkit-scrollbar-thumb:hover {background:var(--text-muted)}
+
+/* ─── Responsive ─── */
+@media(max-width:640px) {
+  .chat-inner {padding:16px 12px 120px}
+  .input-area {padding:12px 12px 16px}
+  .header {padding:10px 14px}
+  .welcome {padding:40px 16px 20px}
+  .welcome h2 {font-size:20px}
+  .welcome-examples {max-width:100%}
+  .msg-body pre {font-size:12px;padding:10px 12px}
+}
+
+/* ─── Animations ─── */
+.fade-in {animation:fadeIn 0.25s ease}
+@keyframes fadeIn {
+  from {opacity:0;transform:translateY(6px)}
+  to   {opacity:1;transform:none}
+}
+
+/* ─── Selection ─── */
+::selection {background:var(--accent-dim);color:white}
+</style>
+</head>
+<body>
+
+<!-- ═══ Header ═══ -->
+<header class="header">
+  <div class="header-logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:var(--accent)">
+      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+    </svg>
+    <span>NeuronOS</span>
+  </div>
+  <span class="header-ver" id="ver"></span>
+  <div class="header-right">
+    <span class="header-badge" id="model-badge"></span>
+    <span class="header-status" id="status">Local</span>
+  </div>
+</header>
+
+<!-- ═══ Chat ═══ -->
+<main class="chat" id="chat">
+  <div class="chat-inner" id="chat-inner">
+
+    <!-- Welcome -->
+    <div class="welcome" id="welcome">
+      <div class="welcome-icon">⚡</div>
+      <h2>NeuronOS Agent</h2>
+      <p>
+        Sovereign AI running 100% on your device.<br>
+        No cloud. No data leaves your machine. Ever.
+      </p>
+      <div class="welcome-caps">
+        <span class="welcome-cap">🧠 Reasoning</span>
+        <span class="welcome-cap">🛠 Tools</span>
+        <span class="welcome-cap">💾 Memory</span>
+        <span class="welcome-cap">📁 Files</span>
+        <span class="welcome-cap">🌐 Web</span>
+        <span class="welcome-cap">💻 Shell</span>
+        <span class="welcome-cap">🔌 MCP</span>
+      </div>
+      <div class="welcome-examples" id="examples">
+        <div class="welcome-example" onclick="useExample(this)">
+          <span>→</span> What files are in the current directory?
+        </div>
+        <div class="welcome-example" onclick="useExample(this)">
+          <span>→</span> Explain the architecture of this project
+        </div>
+        <div class="welcome-example" onclick="useExample(this)">
+          <span>→</span> Remember that the deadline is March 15
+        </div>
+        <div class="welcome-example" onclick="useExample(this)">
+          <span>→</span> Search my memory for previous notes
+        </div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<!-- ═══ Live Step Indicator ═══ -->
+<div class="live" id="live">
+  <div class="live-icon"></div>
+  <div class="live-text" id="live-text"></div>
+</div>
+
+<!-- ═══ Input ═══ -->
+<div class="input-area">
+  <div class="input-box">
+    <textarea id="input" rows="1" placeholder="Ask anything..."
+      onkeydown="handleKey(event)"
+      oninput="autoResize(this)"
+    ></textarea>
+    <div class="input-actions">
+      <button class="btn-send" id="btn-send" onclick="sendMessage()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <path d="M5 12h14M12 5l7 7-7 7"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════
+   NeuronOS Chat UI — Client Logic
+   SSE streaming · Agent steps · Markdown rendering
+   ═══════════════════════════════════════════════════════════ */
+
+const chatInner = document.getElementById('chat-inner');
+const chatEl    = document.getElementById('chat');
+const inputEl   = document.getElementById('input');
+const btnSend   = document.getElementById('btn-send');
+const liveEl    = document.getElementById('live');
+const liveText  = document.getElementById('live-text');
+const welcomeEl = document.getElementById('welcome');
+const statusEl  = document.getElementById('status');
+
+let busy = false;
+
+/* ─── Init: fetch status ─── */
+fetch('/health').then(r => r.json()).then(d => {
+  document.getElementById('ver').textContent = 'v' + (d.version || '?');
+  statusEl.classList.remove('offline');
+  if (d.model) document.getElementById('model-badge').textContent = d.model;
+}).catch(() => {
+  statusEl.textContent = 'Offline';
+  statusEl.classList.add('offline');
+});
+
+/* ─── Example prompts ─── */
+function useExample(el) {
+  const text = el.textContent.replace(/^→\s*/, '').trim();
+  inputEl.value = text;
+  inputEl.focus();
+  autoResize(inputEl);
+}
+
+/* ─── Input handling ─── */
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoResize(el) {
+  el.style.height = '24px';
+  el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+}
+
+/* ─── HTML escaping ─── */
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/* ─── Simple Markdown → HTML ─── */
+function renderMarkdown(text) {
+  if (!text) return '';
+  let html = esc(text);
+
+  // Code blocks: ```lang\ncode\n```
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    '<pre><code>' + code.trim() + '</code></pre>'
+  );
+
+  // Inline code: `code`
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  // Bold: **text**
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  // Italic: *text*
+  html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+  // Links: [text](url)
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // Line breaks → paragraphs
+  html = html.replace(/\n\n+/g, '</p><p>');
+  html = html.replace(/\n/g, '<br>');
+  html = '<p>' + html + '</p>';
+
+  // Clean up empty paragraphs
+  html = html.replace(/<p>\s*<\/p>/g, '');
+  html = html.replace(/<p>\s*(<pre>)/g, '$1');
+  html = html.replace(/(<\/pre>)\s*<\/p>/g, '$1');
+
+  return html;
+}
+
+/* ─── Render a step ─── */
+function renderStep(step) {
+  const div = document.createElement('div');
+  div.className = 'step fade-in ';
+
+  if (step.type === 'thinking') {
+    div.className += 'step-think';
+    div.textContent = '💭 ' + step.text;
+  } else if (step.type === 'tool') {
+    div.className += 'step-tool';
+    div.textContent = '🔧 ' + step.name + (step.args ? ' ' + step.args : '');
+  } else if (step.type === 'observation') {
+    div.className += 'step-obs';
+    const txt = step.text || '';
+    div.textContent = txt.length > 500 ? txt.substring(0, 500) + '…' : txt;
+  }
+
+  return div;
+}
+
+/* ─── Add a message group to chat ─── */
+function addMessage(role, html, steps) {
+  if (welcomeEl.style.display !== 'none') {
+    welcomeEl.style.display = 'none';
+  }
+
+  const group = document.createElement('div');
+  group.className = 'msg-group fade-in';
+
+  // Label
+  const label = document.createElement('div');
+  label.className = 'msg-label ' + role;
+  if (role === 'user') {
+    label.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2"/></svg> You';
+  } else {
+    label.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> NeuronOS';
+  }
+  group.appendChild(label);
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  body.innerHTML = html;
+  group.appendChild(body);
+
+  // Steps
+  if (steps && steps.length > 0) {
+    const stepsDiv = document.createElement('div');
+    stepsDiv.className = 'steps';
+    steps.forEach(s => stepsDiv.appendChild(renderStep(s)));
+    group.appendChild(stepsDiv);
+  }
+
+  chatInner.appendChild(group);
+  scrollToBottom();
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  });
+}
+
+/* ─── Update live indicator ─── */
+function setLive(text) {
+  if (text) {
+    liveEl.classList.add('on');
+    liveText.innerHTML = text;
+  } else {
+    liveEl.classList.remove('on');
+    liveText.innerHTML = '';
+  }
+}
+
+/* ─── Send message via SSE ─── */
+async function sendMessage() {
+  if (busy) return;
+  const text = inputEl.value.trim();
+  if (!text) return;
+
+  inputEl.value = '';
+  inputEl.style.height = '24px';
+  addMessage('user', esc(text));
+
+  busy = true;
+  btnSend.disabled = true;
+  setLive('<em>Thinking...</em>');
+
+  let steps = [];
+  let response = '';
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+
+    if (!res.ok) {
+      throw new Error('Server returned ' + res.status);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') continue;
+
+        try {
+          const ev = JSON.parse(payload);
+
+          if (ev.type === 'thinking') {
+            steps.push(ev);
+            setLive('💭 <em>' + esc(ev.text.substring(0, 80)) + '</em>');
+          } else if (ev.type === 'tool') {
+            steps.push(ev);
+            setLive('🔧 <em>' + esc(ev.name) + '</em>');
+          } else if (ev.type === 'observation') {
+            steps.push(ev);
+            setLive('📋 Processing result...');
+          } else if (ev.type === 'response') {
+            response = ev.text;
+          } else if (ev.type === 'error') {
+            response = '⚠️ ' + (ev.text || 'Agent error');
+          }
+        } catch (e) { /* skip malformed events */ }
+      }
+    }
+  } catch (err) {
+    response = '⚠️ Connection error: ' + err.message;
+  }
+
+  setLive(null);
+
+  if (response) {
+    addMessage('bot', renderMarkdown(response), steps);
+  }
+
+  busy = false;
+  btnSend.disabled = false;
+  inputEl.focus();
+}
+
+/* ─── Focus input on load ─── */
+inputEl.focus();
+
+/* ─── Ctrl+/ to show shortcuts (future) ─── */
+document.addEventListener('keydown', (e) => {
+  if (e.key === '/' && !busy && document.activeElement !== inputEl) {
+    e.preventDefault();
+    inputEl.focus();
+  }
+});
+</script>
+</body>
+</html>
