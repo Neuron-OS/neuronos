@@ -1,27 +1,25 @@
 /* ============================================================
  * NeuronOS CLI v0.9.0 — Universal AI Agent Interface
  *
- * ZERO-ARG: Just run `neuronos` → auto-configures everything.
- * Detects hardware, finds best model, tunes params, starts agent.
- *
- * Context-aware launch:
- *   Terminal (TTY)   → Interactive REPL with agent
- *   No TTY / GUI     → HTTP server + browser chat UI
+ * ZERO-CONFIG: Just run `neuronos` → everything works.
+ * Auto-detects hardware, finds/downloads model, starts agent,
+ * launches server, opens browser. One command, zero friction.
  *
  * Modes:
- *   neuronos                        Interactive agent (auto-detect)
- *   neuronos ui                     Open browser chat UI
- *   neuronos run "prompt"           One-shot generation
+ *   neuronos                        Start UI (server + browser)
+ *   neuronos chat                   Terminal REPL with agent
+ *   neuronos run "prompt"           One-shot text generation
  *   neuronos agent "task"           One-shot agent with tools
- *   neuronos serve                  HTTP server (OpenAI-compatible)
+ *   neuronos serve                  HTTP server only (no browser)
  *   neuronos mcp                    MCP server (STDIO transport)
  *   neuronos hwinfo                 Show hardware capabilities
- *   neuronos scan [dir]             Scan for models
+ *   neuronos scan [dir]             Scan for GGUF models
  *   neuronos <model.gguf> generate  Legacy mode
  *   neuronos <model.gguf> agent     Legacy mode
  * ============================================================ */
 #include "neuronos/neuronos.h"
 #include "neuronos/neuronos_hal.h"
+#include "neuronos/neuronos_model_registry.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -73,21 +71,20 @@ static void print_banner(void) {
 /* ---- Usage ---- */
 static void print_usage(const char * prog) {
     fprintf(stderr,
-            "NeuronOS v%s — Universal AI Agent Engine\n\n"
+            "NeuronOS v%s — Sovereign AI Agent Engine\n\n"
             "Usage:\n"
-            "  %s                              Auto-detect: REPL or chat UI\n"
-            "  %s ui                            Open browser chat UI\n"
+            "  %s                              Start (server + open browser)\n"
+            "  %s chat                          Terminal REPL with agent\n"
             "  %s run \"prompt\"                  One-shot text generation\n"
             "  %s agent \"task\"                  One-shot agent with tools\n"
-            "  %s serve [--port 8080]           HTTP server (OpenAI API)\n"
+            "  %s serve [--port 8384]           HTTP server only (no browser)\n"
             "  %s mcp                           MCP server (STDIO transport)\n"
+            "  %s model list                    Show available models\n"
+            "  %s model recommend               Best model for your hardware\n"
+            "  %s model pull [id]               Download a model\n"
+            "  %s model remove <id>             Delete a downloaded model\n"
             "  %s hwinfo                        Show hardware capabilities\n"
             "  %s scan [dir]                    Scan for GGUF models\n"
-            "\n"
-            "Legacy mode:\n"
-            "  %s <model.gguf> generate \"text\"  Generate with specific model\n"
-            "  %s <model.gguf> agent \"task\"     Agent with specific model\n"
-            "  %s <model.gguf> info             Show model info\n"
             "\n"
             "Options:\n"
             "  -t <threads>     Number of threads (default: auto)\n"
@@ -101,100 +98,216 @@ static void print_usage(const char * prog) {
             "  --mcp <file>     MCP client config (default: ~/.neuronos/mcp.json)\n"
             "  --verbose        Show debug info\n"
             "  --help           Show this help\n",
-            NEURONOS_VERSION_STRING, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+            NEURONOS_VERSION_STRING, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
-/* ---- Auto-download model when none found ---- */
-#define MODEL_DOWNLOAD_URL                                                                                             \
-    "https://huggingface.co/microsoft/bitnet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf"
-#define MODEL_DOWNLOAD_NAME "ggml-model-i2_s.gguf"
-#define MODEL_DOWNLOAD_SIZE_MB 780
-
+/* ---- Auto-download model: registry-based smart selection ---- */
 static int auto_download_model(bool verbose) {
-    /* Determine model directory: ~/.neuronos/models/ */
-    char models_dir[512] = {0};
-    char model_path[1024] = {0};
-    const char * home = getenv("HOME");
-#ifdef _WIN32
-    if (!home)
-        home = getenv("USERPROFILE");
-#endif
-    if (!home) {
-        fprintf(stderr, "Cannot determine home directory.\n");
+    /* Detect available RAM */
+    neuronos_hw_info_t hw = neuronos_detect_hardware();
+    int64_t ram_mb = hw.ram_total_mb > 0 ? hw.ram_total_mb : 4096; /* fallback */
+
+    if (verbose) {
+        fprintf(stderr, "[registry] Detected RAM: %lld MB\n", (long long)ram_mb);
+    }
+
+    /* Find the best model for this hardware */
+    const neuronos_registry_entry_t * best = neuronos_registry_best_for_ram(ram_mb);
+    if (!best) {
+        fprintf(stderr,
+                "\033[31mError: No compatible model found for %lld MB RAM.\033[0m\n"
+                "Minimum requirement: 800 MB RAM.\n",
+                (long long)ram_mb);
         return -1;
     }
 
-    snprintf(models_dir, sizeof(models_dir), "%s/.neuronos/models", home);
-    snprintf(model_path, sizeof(model_path), "%s/%s", models_dir, MODEL_DOWNLOAD_NAME);
-
-    /* Check if already exists */
-    FILE * check = fopen(model_path, "r");
-    if (check) {
-        fclose(check);
+    /* Check if already downloaded */
+    char * existing = neuronos_model_find_downloaded(best);
+    if (existing) {
         if (verbose)
-            fprintf(stderr, "[model already at %s]\n", model_path);
+            fprintf(stderr, "[registry] Model already at: %s\n", existing);
+        free(existing);
         return 0;
     }
 
-    /* Show download prompt */
-    fprintf(stderr,
-            "\033[36m"
-            "╔══════════════════════════════════════════════╗\n"
-            "║  NeuronOS — First Run Setup                  ║\n"
-            "╠══════════════════════════════════════════════╣\n"
-            "║  No AI model found on this device.           ║\n"
-            "║                                              ║\n"
-            "║  Recommended: BitNet b1.58 2B (~%d MB)      ║\n"
-            "║  • Runs on any CPU, no GPU needed            ║\n"
-            "║  • 1.58-bit ternary — ultra-efficient        ║\n"
-            "║  • Full agent capabilities                   ║\n"
-            "╚══════════════════════════════════════════════╝\n"
-            "\033[0m",
-            MODEL_DOWNLOAD_SIZE_MB);
+    /* Show what we're about to do */
+    bool is_tty = isatty(fileno(stderr));
+    if (is_tty) {
+        fprintf(stderr,
+                "\033[36m"
+                "╔══════════════════════════════════════════════╗\n"
+                "║  NeuronOS — Smart Auto Setup                 ║\n"
+                "╠══════════════════════════════════════════════╣\n"
+                "║  Your hardware: %-5lld MB RAM                 ║\n"
+                "║  Best model:    %-29s║\n"
+                "║  Parameters:    %-2lldB • Size: ~%-4lld MB        ║\n"
+                "║                                              ║\n"
+                "║  • 1.58-bit ternary — runs on CPU only       ║\n"
+                "║  • Full agent: tools + memory + reasoning    ║\n"
+                "╚══════════════════════════════════════════════╝\n"
+                "\033[0m\n",
+                (long long)ram_mb,
+                best->display_name,
+                (long long)best->n_params_b,
+                (long long)best->size_mb);
+    }
 
-    /* Auto-download if running interactively, ask first */
-    if (isatty(fileno(stdin))) {
-        fprintf(stderr, "  Download now? [Y/n] ");
-        char answer[16] = {0};
-        if (fgets(answer, sizeof(answer), stdin)) {
-            if (answer[0] == 'n' || answer[0] == 'N') {
-                fprintf(stderr, "\n  Download manually:\n"
-                                "    mkdir -p %s\n"
-                                "    curl -L -o %s \\\n"
-                                "      %s\n\n",
-                        models_dir, model_path, MODEL_DOWNLOAD_URL);
-                return -1;
+    return neuronos_model_download(best, NULL, NULL, NULL);
+}
+
+/* ---- Model subcommand: neuronos model <list|pull|recommend|remove> ---- */
+static int cmd_model(const char * subcmd, const char * arg, bool verbose) {
+    neuronos_hw_info_t hw = neuronos_detect_hardware();
+    int64_t ram_mb = hw.ram_total_mb > 0 ? hw.ram_total_mb : 4096;
+
+    /* ── neuronos model list ── */
+    if (!subcmd || strcmp(subcmd, "list") == 0 || strcmp(subcmd, "ls") == 0) {
+        int count = 0;
+        const neuronos_registry_entry_t * all = neuronos_registry_get_all(&count);
+
+        printf("\033[1m%-16s %-35s %5s %6s %6s %3s  %s\033[0m\n",
+               "ID", "Name", "Params", "Size", "MinRAM", "Ctx", "Status");
+        printf("──────────────── ─────────────────────────────────── ───── "
+               "────── ────── ───  ────────\n");
+
+        for (int i = 0; i < count; i++) {
+            const neuronos_registry_entry_t * e = &all[i];
+            char * path = neuronos_model_find_downloaded(e);
+            bool installed = (path != NULL);
+            bool fits = (e->min_ram_mb <= ram_mb);
+            free(path);
+
+            printf("%-16s %-35.35s %3lldB  %4lldMB %4lldMB %3dk  %s%s%s\n",
+                   e->id, e->display_name,
+                   (long long)e->n_params_b,
+                   (long long)e->size_mb,
+                   (long long)e->min_ram_mb,
+                   e->n_ctx_max / 1000,
+                   installed ? "\033[32m✓ installed" : (fits ? "\033[33m○ available" : "\033[31m✗ too large"),
+                   "\033[0m",
+                   "");
+        }
+        printf("\nYour RAM: %lld MB\n", (long long)ram_mb);
+        return 0;
+    }
+
+    /* ── neuronos model recommend ── */
+    if (strcmp(subcmd, "recommend") == 0 || strcmp(subcmd, "rec") == 0) {
+        int indices[8];
+        int count = neuronos_registry_recommend(ram_mb, indices, 8);
+
+        if (count == 0) {
+            fprintf(stderr, "No models fit in your %lld MB RAM.\n", (long long)ram_mb);
+            return 1;
+        }
+
+        int total = 0;
+        const neuronos_registry_entry_t * all = neuronos_registry_get_all(&total);
+
+        printf("\033[36mRecommended models for %lld MB RAM:\033[0m\n\n", (long long)ram_mb);
+        for (int i = 0; i < count; i++) {
+            const neuronos_registry_entry_t * e = &all[indices[i]];
+            char stars[16] = {0};
+            for (int s = 0; s < e->quality_stars && s < 5; s++)
+                strcat(stars, "★");
+
+            printf("  %s%d. %s%s\n"
+                   "     %lldB params • ~%lld MB • %s • %s\n"
+                   "     Pull: neuronos model pull %s\n\n",
+                   i == 0 ? "\033[32m" : "",
+                   i + 1,
+                   e->display_name,
+                   i == 0 ? " ← BEST\033[0m" : "",
+                   (long long)e->n_params_b,
+                   (long long)e->size_mb,
+                   stars,
+                   e->languages,
+                   e->id);
+        }
+        return 0;
+    }
+
+    /* ── neuronos model pull <id> ── */
+    if (strcmp(subcmd, "pull") == 0 || strcmp(subcmd, "download") == 0) {
+        const neuronos_registry_entry_t * entry = NULL;
+
+        if (!arg || strlen(arg) == 0) {
+            /* No ID given — download the best model */
+            entry = neuronos_registry_best_for_ram(ram_mb);
+            if (!entry) {
+                fprintf(stderr, "No compatible model for your hardware.\n");
+                return 1;
+            }
+            fprintf(stderr, "No model specified, selecting best for your hardware:\n");
+            fprintf(stderr, "  → %s (%lldB, ~%lld MB)\n\n",
+                    entry->display_name, (long long)entry->n_params_b, (long long)entry->size_mb);
+        } else {
+            entry = neuronos_registry_find(arg);
+            if (!entry) {
+                fprintf(stderr, "Unknown model: '%s'\n", arg);
+                fprintf(stderr, "Use 'neuronos model list' to see available models.\n");
+                return 1;
+            }
+
+            if (entry->min_ram_mb > ram_mb) {
+                fprintf(stderr,
+                        "\033[33mWarning: %s requires %lld MB RAM, you have %lld MB.\033[0m\n"
+                        "It may not run well on this device.\n\n",
+                        entry->id, (long long)entry->min_ram_mb, (long long)ram_mb);
             }
         }
+
+        return neuronos_model_download(entry, NULL, NULL, NULL);
     }
 
-    /* Create directory */
-    char mkdir_cmd[1024];
-    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p \"%s\"", models_dir);
-    if (system(mkdir_cmd) != 0) {
-        fprintf(stderr, "Error: Cannot create directory %s\n", models_dir);
-        return -1;
+    /* ── neuronos model remove <id> ── */
+    if (strcmp(subcmd, "remove") == 0 || strcmp(subcmd, "rm") == 0 || strcmp(subcmd, "delete") == 0) {
+        if (!arg) {
+            fprintf(stderr, "Usage: neuronos model remove <model-id>\n");
+            return 1;
+        }
+        const neuronos_registry_entry_t * entry = neuronos_registry_find(arg);
+        if (!entry) {
+            fprintf(stderr, "Unknown model: '%s'\n", arg);
+            return 1;
+        }
+        return neuronos_model_remove(entry);
     }
 
-    /* Download with curl */
-    fprintf(stderr, "\n  Downloading BitNet b1.58 2B (~%d MB)...\n\n", MODEL_DOWNLOAD_SIZE_MB);
-    char curl_cmd[2048];
-    snprintf(curl_cmd, sizeof(curl_cmd), "curl -fL --progress-bar -o \"%s\" \"%s\"", model_path, MODEL_DOWNLOAD_URL);
-
-    int ret = system(curl_cmd);
-    if (ret != 0) {
-        fprintf(stderr, "\n\033[31mDownload failed.\033[0m Try manually:\n"
-                        "  curl -L -o %s %s\n",
-                model_path, MODEL_DOWNLOAD_URL);
-        /* Clean up partial file */
-        char rm_cmd[1024];
-        snprintf(rm_cmd, sizeof(rm_cmd), "rm -f \"%s\"", model_path);
-        system(rm_cmd);
-        return -1;
+    /* ── neuronos model path [id] ── */
+    if (strcmp(subcmd, "path") == 0) {
+        if (arg) {
+            const neuronos_registry_entry_t * entry = neuronos_registry_find(arg);
+            if (!entry) {
+                fprintf(stderr, "Unknown model: '%s'\n", arg);
+                return 1;
+            }
+            char * path = neuronos_model_find_downloaded(entry);
+            if (path) {
+                printf("%s\n", path);
+                free(path);
+                return 0;
+            }
+            fprintf(stderr, "Model '%s' not installed.\n", arg);
+            return 1;
+        }
+        char dir[512];
+        if (neuronos_models_dir(dir, sizeof(dir)) == 0) {
+            printf("%s\n", dir);
+            return 0;
+        }
+        return 1;
     }
 
-    fprintf(stderr, "\n  \033[32m✓ Model ready: %s\033[0m\n\n", model_path);
-    return 0;
+    fprintf(stderr,
+            "Usage: neuronos model <command>\n\n"
+            "Commands:\n"
+            "  list                List all available models\n"
+            "  recommend           Show best models for your hardware\n"
+            "  pull [id]           Download a model (best if no ID given)\n"
+            "  remove <id>         Delete a downloaded model\n"
+            "  path [id]           Show model path\n");
+    return 1;
 }
 
 /* ---- First-run welcome prompt ---- */
@@ -297,21 +410,11 @@ static int cmd_ui_with_model(neuronos_model_t * model, int max_tokens, int max_s
                              float temperature, bool verbose, const char * mcp_config_path,
                              const char * host, int port) {
     fprintf(stderr,
-            "\033[36m"
-            "╔══════════════════════════════════════════════╗\n"
-            "║  NeuronOS v%-6s — Chat UI Mode            ║\n"
-            "║  Starting agent with embedded chat UI...     ║\n"
-            "╚══════════════════════════════════════════════╝\n"
-            "\033[0m",
+            "\n\033[36mNeuronOS v%s\033[0m\n",
             NEURONOS_VERSION_STRING);
 
     /* Open persistent memory */
     neuronos_memory_t * mem = neuronos_memory_open(NULL);
-    if (mem) {
-        int fact_count = 0;
-        neuronos_memory_archival_stats(mem, &fact_count);
-        fprintf(stderr, "Memory: SQLite (persistent, %d facts stored)\n", fact_count);
-    }
 
     /* Tool registry */
     neuronos_tool_registry_t * tools = neuronos_tool_registry_create();
@@ -346,7 +449,8 @@ static int cmd_ui_with_model(neuronos_model_t * model, int max_tokens, int max_s
                 if (loaded > 0) {
                     neuronos_mcp_client_connect(mcp_client);
                     int mcp_tools = neuronos_mcp_client_register_tools(mcp_client, tools);
-                    fprintf(stderr, "MCP: %d external tools from %d server(s)\n", mcp_tools, loaded);
+                    if (verbose)
+                        fprintf(stderr, "MCP: %d external tools from %d server(s)\n", mcp_tools, loaded);
                 } else {
                     neuronos_mcp_client_free(mcp_client);
                     mcp_client = NULL;
@@ -374,13 +478,15 @@ static int cmd_ui_with_model(neuronos_model_t * model, int max_tokens, int max_s
         neuronos_agent_set_memory(agent, mem);
     }
 
-    fprintf(stderr, "Tools: %d registered%s\n", neuronos_tool_count(tools),
-            mem ? " | Memory: active" : "");
+    if (verbose) {
+        fprintf(stderr, "Tools: %d registered%s\n", neuronos_tool_count(tools),
+                mem ? " | Memory: active" : "");
+    }
 
     /* Open browser */
     char url[256];
     snprintf(url, sizeof(url), "http://%s:%d", host, port);
-    fprintf(stderr, "Opening %s in your browser...\n", url);
+    fprintf(stderr, "\n  ▶ http://%s:%d\n\n  Press Ctrl+C to stop.\n\n", host, port);
     open_browser(url);
 
     /* Start server (blocking) — agent mode */
@@ -954,6 +1060,7 @@ int main(int argc, char * argv[]) {
     /* Find the first positional argument (not an option) */
     const char * command = NULL;
     const char * positional2 = NULL; /* prompt or sub-command */
+    const char * positional3 = NULL; /* argument for sub-sub-command */
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
             /* Skip option + its value */
@@ -969,9 +1076,18 @@ int main(int argc, char * argv[]) {
             command = argv[i];
         } else if (!positional2) {
             positional2 = argv[i];
+        } else if (!positional3) {
+            positional3 = argv[i];
         } else {
             break;
         }
+    }
+
+    /* ════════════════════════════════════════════════════════
+     * MODEL — Model management (no inference needed)
+     * ════════════════════════════════════════════════════════ */
+    if (command && strcmp(command, "model") == 0) {
+        return cmd_model(positional2, positional3, verbose);
     }
 
     /* ════════════════════════════════════════════════════════
@@ -1154,8 +1270,9 @@ int main(int argc, char * argv[]) {
         }
     }
 
-    /* First run: show welcome message */
-    if (!command && isatty(fileno(stdin))) {
+    /* First run: show welcome message (only in terminal REPL mode) */
+    if (command && (strcmp(command, "chat") == 0 || strcmp(command, "repl") == 0) &&
+        isatty(fileno(stdin))) {
         run_first_run_welcome(ctx.model);
     }
 
@@ -1181,8 +1298,12 @@ int main(int argc, char * argv[]) {
         rc = (status == NEURONOS_OK) ? 0 : 1;
     }
     /* ── UI: Browser chat UI with agent ── */
-    else if (command && strcmp(command, "ui") == 0) {
+    else if (command && (strcmp(command, "ui") == 0 || strcmp(command, "open") == 0)) {
         rc = cmd_ui_with_model(ctx.model, max_tokens, max_steps, temperature, verbose, mcp_config, host, port);
+    }
+    /* ── CHAT/REPL: Terminal interactive agent ── */
+    else if (command && (strcmp(command, "chat") == 0 || strcmp(command, "repl") == 0)) {
+        rc = cmd_repl_model(ctx.model, max_tokens, max_steps, temperature, grammar_file, verbose, mcp_config);
     }
     /* ── MCP: Model Context Protocol server (STDIO) ── */
     else if (command && strcmp(command, "mcp") == 0) {
@@ -1226,15 +1347,9 @@ int main(int argc, char * argv[]) {
             rc = 1;
         }
     }
-    /* ── DEFAULT: Interactive REPL (zero args or unknown command) ── */
+    /* ── DEFAULT: Always launch UI (server + browser). Zero friction. ── */
     else if (!command) {
-        if (isatty(fileno(stdin)) && isatty(fileno(stdout))) {
-            /* Terminal: interactive REPL */
-            rc = cmd_repl_model(ctx.model, max_tokens, max_steps, temperature, grammar_file, verbose, mcp_config);
-        } else {
-            /* No TTY (double-click, desktop launcher, piped): browser chat UI */
-            rc = cmd_ui_with_model(ctx.model, max_tokens, max_steps, temperature, verbose, mcp_config, host, port);
-        }
+        rc = cmd_ui_with_model(ctx.model, max_tokens, max_steps, temperature, verbose, mcp_config, host, port);
     } else {
         fprintf(stderr, "Unknown command: %s\n\n", command);
         print_usage(argv[0]);

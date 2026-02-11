@@ -794,12 +794,13 @@ void neuronos_tune_print(const neuronos_tuned_params_t * params) {
  *   detect → scan → select → tune → load → ready
  * ============================================================ */
 
-/* Default model search paths */
+/* Default model search paths (all non-NULL; home dir added at runtime) */
 static const char * default_search_paths[] = {
     "./models",
-    "../../models", /* relative to build dir */
-    NULL,           /* $HOME/.neuronos/models (filled at runtime) */
+    "../../models",              /* relative to build dir */
+    "./neuronos/models",         /* relative to workspace root */
     "/usr/share/neuronos/models",
+    "/usr/local/share/neuronos/models",
     NULL, /* sentinel */
 };
 
@@ -822,12 +823,7 @@ neuronos_auto_ctx_t neuronos_auto_launch(const char ** extra_model_dirs, bool ve
         }
     }
 
-    /* Add default paths */
-    for (int i = 0; default_search_paths[i] && sp < 14; i++) {
-        search_paths[sp++] = default_search_paths[i];
-    }
-
-    /* Add $HOME/.neuronos/models */
+    /* Add $HOME/.neuronos/models FIRST (highest default priority — where auto-download puts models) */
     char home_models[512] = {0};
     const char * home = getenv("HOME");
     if (!home)
@@ -835,6 +831,11 @@ neuronos_auto_ctx_t neuronos_auto_launch(const char ** extra_model_dirs, bool ve
     if (home) {
         snprintf(home_models, sizeof(home_models), "%s/.neuronos/models", home);
         search_paths[sp++] = home_models;
+    }
+
+    /* Add default paths */
+    for (int i = 0; default_search_paths[i] && sp < 14; i++) {
+        search_paths[sp++] = default_search_paths[i];
     }
 
     /* Add $NEURONOS_MODELS env var */

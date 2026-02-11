@@ -23,8 +23,8 @@ extern "C" {
 /* ---- Version ---- */
 #define NEURONOS_VERSION_MAJOR 0
 #define NEURONOS_VERSION_MINOR 9
-#define NEURONOS_VERSION_PATCH 0
-#define NEURONOS_VERSION_STRING "0.9.0"
+#define NEURONOS_VERSION_PATCH 1
+#define NEURONOS_VERSION_STRING "0.9.1"
 
 /* ---- Opaque types ---- */
 typedef struct neuronos_engine neuronos_engine_t;
@@ -689,5 +689,8 @@ void neuronos_mcp_client_free(neuronos_mcp_client_t * client);
 #ifdef __cplusplus
 }
 #endif
+
+/* Model registry — available separately or via this umbrella header */
+#include "neuronos_model_registry.h"
 
 #endif /* NEURONOS_H */

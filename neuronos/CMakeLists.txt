@@ -99,6 +99,7 @@ endif()
 set(ENGINE_SOURCES
     src/engine/neuronos_engine.c
     src/engine/neuronos_model_selector.c
+    src/engine/neuronos_model_registry.c
 )
 
 add_library(neuronos_engine STATIC ${ENGINE_SOURCES})
@@ -193,6 +194,25 @@ endif()
 # ═════════════════════════════════════════════════════════════
 # Layer 4: Interface — HTTP server + MCP server
 # ═════════════════════════════════════════════════════════════
+
+# ── WebUI embedding: regenerate C header from HTML if Python3 available ──
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/webui/index.html")
+    set(WEBUI_INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/webui/index.html")
+    set(WEBUI_OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/src/interface/neuronos_chat_ui.h")
+    set(WEBUI_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_webui.py")
+    add_custom_command(
+        OUTPUT  ${WEBUI_OUTPUT}
+        COMMAND ${Python3_EXECUTABLE} ${WEBUI_SCRIPT} --gzip ${WEBUI_INPUT} ${WEBUI_OUTPUT}
+        DEPENDS ${WEBUI_INPUT} ${WEBUI_SCRIPT}
+        COMMENT "Embedding WebUI: index.html → neuronos_chat_ui.h (gzipped)"
+    )
+    add_custom_target(neuronos_webui DEPENDS ${WEBUI_OUTPUT})
+    message(STATUS "NeuronOS: WebUI auto-embed enabled (Python3 found)")
+else()
+    message(STATUS "NeuronOS: Using pre-generated neuronos_chat_ui.h (Python3 not found or webui/index.html missing)")
+endif()
+
 set(INTERFACE_SOURCES
     src/interface/neuronos_server.c
     src/mcp/neuronos_mcp_server.c
@@ -202,8 +222,13 @@ set(INTERFACE_SOURCES
 add_library(neuronos_interface STATIC ${INTERFACE_SOURCES})
 target_include_directories(neuronos_interface
     PUBLIC ${NEURONOS_INCLUDE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/interface
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/mcp
 )
 target_link_libraries(neuronos_interface PUBLIC neuronos_engine)
+if(TARGET neuronos_webui)
+    add_dependencies(neuronos_interface neuronos_webui)
+endif()
 
 if(MSVC)
     target_compile_options(neuronos_interface PRIVATE /W3)

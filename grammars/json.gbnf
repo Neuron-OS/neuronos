@@ -15,7 +15,7 @@ values ::= value ( ws "," ws value )*
 value ::= string | number | object | array | "true" | "false" | "null"
 
 string ::= "\"" characters "\""
-characters ::= "" | characters character
+characters ::= character*
 character ::= [^"\\] | "\\" escape
 escape ::= ["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]
 

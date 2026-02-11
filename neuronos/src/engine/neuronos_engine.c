@@ -170,10 +170,17 @@ neuronos_model_t * neuronos_model_load(neuronos_engine_t * engine, neuronos_mode
 
     struct llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = (uint32_t)ctx_size;
+#ifdef __EMSCRIPTEN__
+    /* WASM: smaller batch to reduce compute buffer allocations,
+     * and disable flash_attn which causes OOB in linear memory. */
+    cparams.n_batch = 128;
+    cparams.flash_attn = false;
+#else
     cparams.n_batch = 512;
+    cparams.flash_attn = true;
+#endif
     cparams.n_threads = engine->n_threads;
     cparams.n_threads_batch = engine->n_threads;
-    cparams.flash_attn = true;
 
     model->llama_ctx = llama_new_context_with_model(model->llama_model, cparams);
     if (!model->llama_ctx) {
@@ -313,9 +320,21 @@ neuronos_gen_result_t neuronos_generate(neuronos_model_t * model, neuronos_gen_p
         llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
     }
 
-    /* --- Evaluate prompt --- */
-    struct llama_batch batch = llama_batch_get_one(prompt_tokens, n_prompt, 0, 0);
-    int rc = llama_decode(ctx, batch);
+    /* --- Evaluate prompt (chunked to fit n_batch) --- */
+#ifdef __EMSCRIPTEN__
+    const int n_batch = 128; /* matches cparams.n_batch for WASM */
+#else
+    const int n_batch = 512; /* matches cparams.n_batch */
+#endif
+    struct llama_batch batch;
+    int rc = 0;
+    for (int i = 0; i < n_prompt; i += n_batch) {
+        int n_eval = n_prompt - i;
+        if (n_eval > n_batch) n_eval = n_batch;
+        batch = llama_batch_get_one(prompt_tokens + i, n_eval, i, 0);
+        rc = llama_decode(ctx, batch);
+        if (rc != 0) break;
+    }
     if (rc != 0) {
         free(prompt_tokens);
         llama_sampler_free(smpl);
