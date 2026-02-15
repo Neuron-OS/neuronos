@@ -46,6 +46,7 @@ endif()
 set(HAL_SOURCES
     src/hal/hal_registry.c
     src/hal/hal_scalar.c
+    src/hal/hal_vulkan.c  # Always included (has stubs when SDK not found)
 )
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|x86")
@@ -189,6 +190,60 @@ if(MSVC)
 elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(neuronos_agent PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+endif()
+
+# ═════════════════════════════════════════════════════════════
+# GPU Backend Support (CUDA + Vulkan)
+# ═════════════════════════════════════════════════════════════
+
+# CUDA Support (NVIDIA GPUs)
+option(NEURONOS_CUDA "Enable CUDA GPU support" ON)
+
+if(NEURONOS_CUDA)
+    find_package(CUDAToolkit QUIET)
+    if(CUDAToolkit_FOUND)
+        message(STATUS "NeuronOS: CUDA Toolkit ${CUDAToolkit_VERSION} found at ${CUDAToolkit_LIBRARY_ROOT}")
+        message(STATUS "NeuronOS: CUDA backend ENABLED")
+
+        # Enable CUDA in llama.cpp (ggml backend)
+        set(GGML_CUDA ON CACHE BOOL "Enable CUDA backend in ggml" FORCE)
+
+        # Define compile-time flag
+        add_compile_definitions(NEURONOS_HAS_CUDA=1)
+
+        # Link against CUDA runtime
+        target_link_libraries(neuronos_hal PUBLIC CUDA::cudart)
+        target_link_libraries(neuronos_engine PUBLIC CUDA::cudart)
+    else()
+        message(STATUS "NeuronOS: CUDA Toolkit not found. CUDA support disabled.")
+        message(STATUS "  Install: https://developer.nvidia.com/cuda-downloads")
+        set(NEURONOS_CUDA OFF)
+    endif()
+endif()
+
+# Vulkan Support (Universal: AMD/Intel/NVIDIA)
+option(NEURONOS_VULKAN "Enable Vulkan GPU support" ON)
+
+if(NEURONOS_VULKAN)
+    find_package(Vulkan QUIET)
+
+    if(Vulkan_FOUND)
+        message(STATUS "NeuronOS: Vulkan SDK found at ${Vulkan_LIBRARY}")
+        message(STATUS "NeuronOS: Vulkan backend ENABLED")
+
+        # Enable Vulkan in llama.cpp (ggml backend)
+        set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan backend in ggml" FORCE)
+
+        # Define compile-time flag for conditional compilation
+        add_compile_definitions(NEURONOS_HAS_VULKAN=1)
+
+        # Link HAL against Vulkan
+        target_link_libraries(neuronos_hal PUBLIC Vulkan::Vulkan)
+    else()
+        message(STATUS "NeuronOS: Vulkan SDK not found. Vulkan support disabled.")
+        message(STATUS "  Install: https://vulkan.lunarg.com/sdk/home")
+        set(NEURONOS_VULKAN OFF)
+    endif()
 endif()
 
 # ═════════════════════════════════════════════════════════════
