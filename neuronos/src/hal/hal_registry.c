@@ -167,6 +167,11 @@ extern const neuronos_backend_t neuronos_backend_x86_avxvnni;
 extern const neuronos_backend_t neuronos_backend_arm_neon;
 #endif
 
+/* Vulkan GPU detection (from hal_vulkan.c) */
+extern neuronos_hal_status_t neuronos_hal_vulkan_init(void);
+extern void neuronos_hal_vulkan_print_info(void);
+
+
 /* ──────────────────────────── HAL API implementation ────────────── */
 
 neuronos_hal_status_t neuronos_hal_init(void) {
@@ -190,6 +195,11 @@ neuronos_hal_status_t neuronos_hal_init(void) {
 
 #if defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON)
     neuronos_hal_register_backend(&neuronos_backend_arm_neon);
+#endif
+
+    /* Initialize Vulkan GPU detection (independent of CPU backends) */
+#ifdef NEURONOS_HAS_VULKAN
+    neuronos_hal_vulkan_init();
 #endif
 
     /* Select best backend: highest priority that satisfies feature requirements */
@@ -424,6 +434,10 @@ void neuronos_hal_print_info(void) {
     } else {
         printf("Active backend: NONE\n");
     }
+
+    /* Vulkan GPU info (if compiled with Vulkan support) */
+    printf("\n");
+    neuronos_hal_vulkan_print_info();
 }
 
 /* ──────────────── Device tier detection ──────────────── */

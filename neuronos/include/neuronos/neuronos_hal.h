@@ -316,13 +316,35 @@ void neuronos_gemm_i2_i8(int n, float * s, size_t bs, const void * vx, const voi
  */
 const neuronos_kernel_config_t * neuronos_hal_get_kernel_config(void);
 
-/* ──────── Hardware detection utilities ──────── */
-
 /**
  * Print detected hardware capabilities to stdout.
  * Useful for diagnostics and benchmarking.
  */
 void neuronos_hal_print_info(void);
+
+/* ──────── Vulkan GPU queries (when compiled with Vulkan support) ──────── */
+
+#ifdef NEURONOS_HAS_VULKAN
+/**
+ * Initialize Vulkan GPU detection.
+ * Called automatically by neuronos_hal_init(), but can be called manually.
+ * Returns NEURONOS_HAL_OK on success, even if no Vulkan GPU found.
+ */
+neuronos_hal_status_t neuronos_hal_vulkan_init(void);
+
+/**
+ * Get Vulkan device information (opaque pointer).
+ * Returns NULL if Vulkan not available or not initialized.
+ * Use neuronos_hal_vulkan_print_info() for human-readable output.
+ */
+const void* neuronos_hal_vulkan_get_device(void);
+
+/**
+ * Print Vulkan GPU information to stdout.
+ * Shows GPU name, VRAM, vendor, or "Not available" if no Vulkan GPU.
+ */
+void neuronos_hal_vulkan_print_info(void);
+#endif
 
 #ifdef __cplusplus
 }
