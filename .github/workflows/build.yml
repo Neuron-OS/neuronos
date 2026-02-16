@@ -162,8 +162,8 @@ jobs:
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
             -DBITNET_X86_TL2=OFF \
             -DBUILD_SHARED_LIBS=OFF \
-            -DNEURONOS_VULKAN=ON \
-            -DGGML_VULKAN=ON \
+            -DNEURONOS_VULKAN=OFF \
+            -DGGML_VULKAN=OFF \
             -DNEURONOS_CUDA=OFF \
             -DGGML_CUDA=OFF
 
