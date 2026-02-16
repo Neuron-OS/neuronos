@@ -97,8 +97,6 @@ jobs:
 
       - name: Install Vulkan SDK (macOS)
         if: runner.os == 'macOS'
-      - name: Install Vulkan SDK (macOS)
-        if: runner.os == 'macOS'
         run: |
           brew install vulkan-headers vulkan-loader molten-vk vulkan-tools
           echo "VULKAN_SDK=$(brew --prefix)" >> $GITHUB_ENV
