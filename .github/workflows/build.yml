@@ -93,7 +93,7 @@ jobs:
 
       - name: Setup Android NDK
         if: matrix.name == 'android-arm64'
-        uses: android-actions/setup-android@v3
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
 
       - name: Install Vulkan SDK (macOS)
         if: runner.os == 'macOS'
