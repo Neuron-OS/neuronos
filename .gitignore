@@ -51,3 +51,7 @@ cuda_*.run
 neuronos-v*.tar.gz
 neuronos/wasm/build-wasm-*/
 neuronos/wasm/dist/
+build-static/
+build-cuda/
+build-gpu/
+build-test/

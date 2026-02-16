@@ -89,7 +89,7 @@ jobs:
       # ────────────────────────────────────────────
       - name: Install deps (Linux)
         if: runner.os == 'Linux' && matrix.name != 'android-arm64'
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: sudo apt-get update && sudo apt-get install -y cmake libvulkan-dev vulkan-tools glslang-tools
 
       - name: Setup Android NDK
         if: matrix.name == 'android-arm64'
@@ -149,10 +149,10 @@ jobs:
         run: |
           cmake -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_C_COMPILER=clang `
             -DCMAKE_CXX_COMPILER=clang++ `
             -DBITNET_X86_TL2=OFF `
-            -DBUILD_SHARED_LIBS=OFF
+            -DBUILD_SHARED_LIBS=OFF `
+            -DNEURONOS_VULKAN=ON
 
       - name: Configure (Android NDK)
         if: matrix.name == 'android-arm64'
@@ -257,7 +257,7 @@ jobs:
         if: matrix.name == 'android-arm64'
         run: |
           VER="${{ steps.ver.outputs.version }}"
-          NAME="neuronos-v${VER}-android-arm64"
+          NAME="neuronos-android-arm64"
           mkdir -p /tmp/${NAME}/bin /tmp/${NAME}/share/neuronos/grammars
           BIN=$(find build -name "neuronos-cli" -type f | head -1)
           cp "$BIN" /tmp/${NAME}/bin/
@@ -270,7 +270,7 @@ jobs:
         shell: pwsh
         run: |
           $VER = "${{ steps.ver_win.outputs.version }}"
-          $NAME = "neuronos-v${VER}-windows-x64"
+          $NAME = "neuronos-windows-x64"
           $staging = "$env:RUNNER_TEMP\$NAME"
 
           New-Item -ItemType Directory -Force -Path "$staging\bin" | Out-Null
@@ -296,7 +296,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: neuronos-v*.tar.gz
+          path: neuronos-*.tar.gz
           retention-days: 30
 
       - name: Upload artifact (zip)
@@ -304,7 +304,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: neuronos-v*.zip
+          path: neuronos-*.zip
           retention-days: 30
 
       # ── Summary ──
@@ -318,7 +318,7 @@ jobs:
           BIN=$(find build -name "neuronos-cli" -type f | head -1)
           [ -n "$BIN" ] && echo "| Binary | $(du -h "$BIN" | cut -f1) |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | ${{ steps.ver.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
-          PKG=$(ls neuronos-v*.tar.gz 2>/dev/null | head -1)
+          PKG=$(ls neuronos-*.tar.gz 2>/dev/null | head -1)
           [ -n "$PKG" ] && echo "| Package | $(du -h "$PKG" | cut -f1) |" >> $GITHUB_STEP_SUMMARY
 
       - name: Summary (Windows)
@@ -333,7 +333,7 @@ jobs:
             "| Arch | x64 |"
             "| Version | $VER |"
           )
-          $pkg = Get-Item "neuronos-v*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $pkg = Get-Item "neuronos-*.zip" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($pkg) { $lines += "| Package | {0:N1} MB |" -f ($pkg.Length / 1MB) }
           $lines -join "`n" >> $env:GITHUB_STEP_SUMMARY
 
@@ -381,11 +381,11 @@ jobs:
 
             | Platform | File |
             |----------|------|
-            | Linux x86_64 | `neuronos-v${{ steps.ver.outputs.version }}-linux-x86_64.tar.gz` |
-            | Linux ARM64 | `neuronos-v${{ steps.ver.outputs.version }}-linux-arm64.tar.gz` |
-            | macOS ARM64 | `neuronos-v${{ steps.ver.outputs.version }}-macos-arm64.tar.gz` |
-            | Windows x64 | `neuronos-v${{ steps.ver.outputs.version }}-windows-x64.zip` |
-            | Android ARM64 | `neuronos-v${{ steps.ver.outputs.version }}-android-arm64.tar.gz` |
+            | Linux x86_64 | `neuronos-linux-x86_64.tar.gz` |
+            | Linux ARM64 | `neuronos-linux-arm64.tar.gz` |
+            | macOS ARM64 | `neuronos-macos-arm64.tar.gz` |
+            | Windows x64 | `neuronos-windows-x64.zip` |
+            | Android ARM64 | `neuronos-android-arm64.tar.gz` |
 
             ### Install (Linux / macOS)
 
@@ -397,14 +397,14 @@ jobs:
 
             ```bash
             # Linux / macOS
-            tar xzf neuronos-v*.tar.gz && cd neuronos-v*/
+            tar xzf neuronos-*.tar.gz && cd neuronos-*/
             curl -L -o model.gguf https://huggingface.co/microsoft/BitNet-b1.58-2B-4T-gguf/resolve/main/ggml-model-i2_s.gguf
             ./bin/neuronos-cli model.gguf chat
             ```
 
             ```powershell
             # Windows
-            Expand-Archive neuronos-v*.zip -DestinationPath neuronos
+            Expand-Archive neuronos-*.zip -DestinationPath neuronos
             cd neuronos
             .\bin\neuronos-cli.exe model.gguf chat
             ```

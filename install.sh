@@ -154,12 +154,37 @@ install_binary() {
         dim "from local build"
     else
         TEMP_DIR="$(mktemp -d)"
-        URL="https://github.com/${GITHUB_REPO}/releases/latest/download/neuronos-${OS}-${ARCH}.tar.gz"
-        info "Downloading neuronos-${OS}-${ARCH}..."
-        curl -fSL --progress-bar -o "${TEMP_DIR}/neuronos.tar.gz" "$URL" \
-            || { err "Download failed. Build from source or check $URL"; exit 1; }
-        tar -xzf "${TEMP_DIR}/neuronos.tar.gz" -C "${TEMP_DIR}"
-        cp "${TEMP_DIR}/neuronos" "${INSTALL_DIR}/neuronos"
+
+        if [ "$OS" = "windows" ]; then
+            URL="https://github.com/${GITHUB_REPO}/releases/latest/download/neuronos-${OS}-${ARCH}.zip"
+            FILE="${TEMP_DIR}/neuronos.zip"
+            info "Downloading neuronos-${OS}-${ARCH}.zip..."
+            curl -fSL --progress-bar -o "$FILE" "$URL" || { err "Download failed."; exit 1; }
+
+            # Unzip (try unzip, then python)
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -q -o "$FILE" -d "$TEMP_DIR"
+            else
+                # Very basic python unzip
+                python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1],'r').extractall(sys.argv[2])" "$FILE" "$TEMP_DIR"
+            fi
+        else
+            URL="https://github.com/${GITHUB_REPO}/releases/latest/download/neuronos-${OS}-${ARCH}.tar.gz"
+            info "Downloading neuronos-${OS}-${ARCH}..."
+            curl -fSL --progress-bar -o "${TEMP_DIR}/neuronos.tar.gz" "$URL" \
+                || { err "Download failed. Build from source or check $URL"; exit 1; }
+            tar -xzf "${TEMP_DIR}/neuronos.tar.gz" -C "${TEMP_DIR}"
+        fi
+
+        # Find binary (handle varied internal structure)
+        BINARY_FOUND=$(find "$TEMP_DIR" -type f -name "neuronos-cli*" -o -name "neuronos*" | grep -v "\.tar\.gz" | grep -v "\.zip" | head -1)
+
+        if [ -z "$BINARY_FOUND" ]; then
+            err "Binary not found in archive!"
+            exit 1
+        fi
+
+        cp "$BINARY_FOUND" "${INSTALL_DIR}/neuronos"
     fi
     chmod +x "${INSTALL_DIR}/neuronos"
 }

@@ -66,7 +66,7 @@ neuronos_hal_status_t neuronos_hal_vulkan_init(void) {
         // Vulkan not available (no driver, SDK issue, etc.)
         g_vk_device.available = false;
         g_vk_initialized = true;
-        return NEURONOS_OK; // Not an error, just no Vulkan
+        return NEURONOS_HAL_OK; // Not an error, just no Vulkan
     }
 
     // Enumerate physical devices
@@ -77,7 +77,7 @@ neuronos_hal_status_t neuronos_hal_vulkan_init(void) {
         vkDestroyInstance(instance, NULL);
         g_vk_device.available = false;
         g_vk_initialized = true;
-        return NEURONOS_OK;
+        return NEURONOS_HAL_OK;
     }
 
     // Get all devices, select best one (prefer discrete GPU)
@@ -155,7 +155,7 @@ neuronos_hal_status_t neuronos_hal_vulkan_init(void) {
 /**
  * Get Vulkan device info (const pointer to singleton)
  */
-const neuronos_vulkan_device_t* neuronos_hal_vulkan_get_device(void) {
+const void* neuronos_hal_vulkan_get_device(void) {
     if (!g_vk_initialized) {
         neuronos_hal_vulkan_init();
     }
@@ -166,7 +166,7 @@ const neuronos_vulkan_device_t* neuronos_hal_vulkan_get_device(void) {
  * Print Vulkan device info (for `neuronos hwinfo` command)
  */
 void neuronos_hal_vulkan_print_info(void) {
-    const neuronos_vulkan_device_t* dev = neuronos_hal_vulkan_get_device();
+    const neuronos_vulkan_device_t* dev = (const neuronos_vulkan_device_t*)neuronos_hal_vulkan_get_device();
 
     if (!dev->available) {
         printf("Vulkan GPU: Not available\n");
