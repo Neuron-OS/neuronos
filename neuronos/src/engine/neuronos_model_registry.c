@@ -369,19 +369,13 @@ char * neuronos_model_find_downloaded(const neuronos_registry_entry_t * entry) {
 
     struct stat st;
     if (stat(path, &st) == 0 && st.st_size > 0) {
-        char * result = malloc(strlen(path) + 1);
-        if (result)
-            strcpy(result, path);
-        return result;
+        return strdup(path);
     }
 
     /* Also check directly in models dir (legacy layout) */
     snprintf(path, sizeof(path), "%s/%s", dir, entry->filename);
     if (stat(path, &st) == 0 && st.st_size > 0) {
-        char * result = malloc(strlen(path) + 1);
-        if (result)
-            strcpy(result, path);
-        return result;
+        return strdup(path);
     }
 
     return NULL;

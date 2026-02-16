@@ -303,6 +303,11 @@ static neuronos_tool_result_t tool_shell(const char * args_json, void * user_dat
 
     size_t cmd_len = (size_t)(cmd_end - cmd_start);
     char * command = malloc(cmd_len + 1);
+    if (!command) {
+        result.success = false;
+        result.error = strdup("error: out of memory");
+        return result;
+    }
     memcpy(command, cmd_start, cmd_len);
     command[cmd_len] = '\0';
 
@@ -320,13 +325,21 @@ static neuronos_tool_result_t tool_shell(const char * args_json, void * user_dat
     size_t out_cap = 4096;
     size_t out_len = 0;
     char * out_buf = malloc(out_cap);
+    if (!out_buf) {
+        pclose(fp);
+        result.success = false;
+        result.error = strdup("error: out of memory");
+        return result;
+    }
 
     char line[512];
     while (fgets(line, (int)sizeof(line), fp)) {
         size_t line_len = strlen(line);
         while (out_len + line_len + 1 > out_cap) {
             out_cap *= 2;
-            out_buf = realloc(out_buf, out_cap);
+            void * tmp = realloc(out_buf, out_cap);
+            if (!tmp) { free(out_buf); pclose(fp); result.success = false; result.error = strdup("error: out of memory"); return result; }
+            out_buf = tmp;
         }
         memcpy(out_buf + out_len, line, line_len);
         out_len += line_len;
@@ -373,6 +386,11 @@ static neuronos_tool_result_t tool_read_file(const char * args_json, void * user
 
     size_t path_len = (size_t)(path_end - path_start);
     char * path = malloc(path_len + 1);
+    if (!path) {
+        result.success = false;
+        result.error = strdup("error: out of memory");
+        return result;
+    }
     memcpy(path, path_start, path_len);
     path[path_len] = '\0';
 
@@ -408,6 +426,12 @@ static neuronos_tool_result_t tool_read_file(const char * args_json, void * user
         size_t out_cap = 16384;
         size_t out_len = 0;
         char * out = malloc(out_cap);
+        if (!out) {
+            fclose(fp);
+            result.success = false;
+            result.error = strdup("error: out of memory");
+            return result;
+        }
         char line_buf[4096];
         int current_line = 0;
 
@@ -423,7 +447,9 @@ static neuronos_tool_result_t tool_read_file(const char * args_json, void * user
 
             while (out_len + (size_t)plen + llen + 1 > out_cap) {
                 out_cap *= 2;
-                out = realloc(out, out_cap);
+                void * tmp = realloc(out, out_cap);
+                if (!tmp) { free(out); fclose(fp); result.success = false; result.error = strdup("error: out of memory"); return result; }
+                out = tmp;
             }
             memcpy(out + out_len, prefix, (size_t)plen);
             out_len += (size_t)plen;
@@ -457,11 +483,17 @@ static neuronos_tool_result_t tool_read_file(const char * args_json, void * user
         }
 
         char * content = malloc((size_t)fsize + 64);
+        if (!content) {
+            fclose(fp);
+            result.success = false;
+            result.error = strdup("error: out of memory");
+            return result;
+        }
         size_t nread = fread(content, 1, (size_t)fsize, fp);
         fclose(fp);
 
         if (truncated) {
-            nread += (size_t)sprintf(content + nread, "\n... [truncated at 64KB]");
+            nread += (size_t)snprintf(content + nread, (size_t)fsize + 64 - nread, "\n... [truncated at 64KB]");
         }
         content[nread] = '\0';
 
@@ -515,6 +547,11 @@ static neuronos_tool_result_t tool_write_file(const char * args_json, void * use
 
     size_t path_len = (size_t)(path_end - path_start);
     char * path = malloc(path_len + 1);
+    if (!path) {
+        result.success = false;
+        result.error = strdup("error: out of memory");
+        return result;
+    }
     memcpy(path, path_start, path_len);
     path[path_len] = '\0';
 
@@ -544,6 +581,12 @@ static neuronos_tool_result_t tool_write_file(const char * args_json, void * use
 
     size_t cnt_len = (size_t)(cnt_end - cnt_start);
     char * content = malloc(cnt_len + 1);
+    if (!content) {
+        free(path);
+        result.success = false;
+        result.error = strdup("error: out of memory");
+        return result;
+    }
     memcpy(content, cnt_start, cnt_len);
     content[cnt_len] = '\0';
 
@@ -666,6 +709,11 @@ static neuronos_tool_result_t tool_list_dir(const char * args_json, void * user_
 
     size_t plen = (size_t)(path_end - path_start);
     char * path = malloc(plen + 1);
+    if (!path) {
+        result.success = false;
+        result.error = strdup("error: out of memory");
+        return result;
+    }
     memcpy(path, path_start, plen);
     path[plen] = '\0';
 
@@ -952,6 +1000,7 @@ static char * mem_json_extract(const char * json, const char * field) {
     while (*pos && !(*pos == '"' && *(pos - 1) != '\\')) pos++;
     size_t len = (size_t)(pos - start);
     char * val = malloc(len + 1);
+    if (!val) return NULL;
     memcpy(val, start, len);
     val[len] = '\0';
     return val;
@@ -1034,12 +1083,23 @@ static neuronos_tool_result_t tool_memory_search(const char * args_json, void * 
     /* Format results as JSON array */
     size_t cap = 4096;
     char * buf = malloc(cap);
+    if (!buf) {
+        neuronos_memory_archival_free(entries, count);
+        result.success = false;
+        result.error = strdup("error: out of memory");
+        return result;
+    }
     size_t len = 0;
     len += (size_t)snprintf(buf + len, cap - len, "[");
     for (int i = 0; i < count; i++) {
         if (i > 0) len += (size_t)snprintf(buf + len, cap - len, ",");
         size_t need = strlen(entries[i].key) + strlen(entries[i].value) + 128;
-        while (len + need > cap) { cap *= 2; buf = realloc(buf, cap); }
+        while (len + need > cap) {
+            cap *= 2;
+            void * tmp = realloc(buf, cap);
+            if (!tmp) { free(buf); neuronos_memory_archival_free(entries, count); result.success = false; result.error = strdup("error: out of memory"); return result; }
+            buf = tmp;
+        }
         len += (size_t)snprintf(buf + len, cap - len,
             "{\"key\":\"%s\",\"value\":\"%s\",\"category\":\"%s\"}",
             entries[i].key, entries[i].value,
@@ -1299,6 +1359,12 @@ static neuronos_tool_result_t tool_read_pdf(const char * args_json, void * user_
         out_cap = 8192;
         free(out_buf);
         out_buf = malloc(out_cap);
+        if (!out_buf) {
+            free(raw_buf);
+            result.success = false;
+            result.error = strdup("error: out of memory");
+            return result;
+        }
 
         bool in_text = false;
         for (size_t i = 0; i + 1 < raw_read; i++) {
@@ -1314,7 +1380,12 @@ static neuronos_tool_result_t tool_read_pdf(const char * args_json, void * user_
                 in_text = false;
                 /* Add newline between text objects */
                 if (out_len > 0 && out_buf[out_len - 1] != '\n') {
-                    if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                    if (out_len + 2 > out_cap) {
+                        out_cap *= 2;
+                        void * tmp = realloc(out_buf, out_cap);
+                        if (!tmp) { free(out_buf); free(raw_buf); result.success = false; result.error = strdup("error: out of memory"); return result; }
+                        out_buf = tmp;
+                    }
                     out_buf[out_len++] = '\n';
                 }
                 continue;
@@ -1332,21 +1403,41 @@ static neuronos_tool_result_t tool_read_pdf(const char * args_json, void * user_
                             if (c == 'n') c = '\n';
                             else if (c == 'r') c = '\r';
                             else if (c == 't') c = '\t';
-                            if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                            if (out_len + 2 > out_cap) {
+                                out_cap *= 2;
+                                void * tmp = realloc(out_buf, out_cap);
+                                if (!tmp) { free(out_buf); free(raw_buf); result.success = false; result.error = strdup("error: out of memory"); return result; }
+                                out_buf = tmp;
+                            }
                             out_buf[out_len++] = c;
                         }
                     } else if (raw_buf[i] == '(') {
                         paren_depth++;
-                        if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                        if (out_len + 2 > out_cap) {
+                            out_cap *= 2;
+                            void * tmp = realloc(out_buf, out_cap);
+                            if (!tmp) { free(out_buf); free(raw_buf); result.success = false; result.error = strdup("error: out of memory"); return result; }
+                            out_buf = tmp;
+                        }
                         out_buf[out_len++] = '(';
                     } else if (raw_buf[i] == ')') {
                         paren_depth--;
                         if (paren_depth > 0) {
-                            if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                            if (out_len + 2 > out_cap) {
+                                out_cap *= 2;
+                                void * tmp = realloc(out_buf, out_cap);
+                                if (!tmp) { free(out_buf); free(raw_buf); result.success = false; result.error = strdup("error: out of memory"); return result; }
+                                out_buf = tmp;
+                            }
                             out_buf[out_len++] = ')';
                         }
                     } else {
-                        if (out_len + 2 > out_cap) { out_cap *= 2; out_buf = realloc(out_buf, out_cap); }
+                        if (out_len + 2 > out_cap) {
+                            out_cap *= 2;
+                            void * tmp = realloc(out_buf, out_cap);
+                            if (!tmp) { free(out_buf); free(raw_buf); result.success = false; result.error = strdup("error: out of memory"); return result; }
+                            out_buf = tmp;
+                        }
                         out_buf[out_len++] = raw_buf[i];
                     }
                     i++;
@@ -1372,6 +1463,12 @@ static neuronos_tool_result_t tool_read_pdf(const char * args_json, void * user_
 
         /* Prefix with notice about fallback mode */
         char * final = malloc(out_len + 128);
+        if (!final) {
+            free(out_buf);
+            result.success = false;
+            result.error = strdup("error: out of memory");
+            return result;
+        }
         int hdr = snprintf(final, 128, "[Note: basic extraction mode, install poppler-utils for better results]\n");
         memcpy(final + hdr, out_buf, out_len + 1);
         free(out_buf);

@@ -223,6 +223,7 @@ static char * memory_resolve_path(const char * db_path) {
 
     size_t len = strlen(home) + 32;
     char * path = malloc(len);
+    if (!path) return NULL;
     snprintf(path, len, "%s/.neuronos", home);
 
     /* Create directory if needed */
@@ -285,6 +286,10 @@ int neuronos_memory_core_append(neuronos_memory_t * mem, const char * label, con
 
     size_t new_len = strlen(existing) + strlen(text) + 2; /* +newline+null */
     char * combined = malloc(new_len);
+    if (!combined) {
+        free(existing);
+        return -1;
+    }
     snprintf(combined, new_len, "%s\n%s", existing, text);
     free(existing);
 
@@ -316,7 +321,9 @@ char * neuronos_memory_core_dump(neuronos_memory_t * mem) {
         size_t need = strlen(label) + strlen(content) + 16;
         while (len + need > cap) {
             cap *= 2;
-            buf = realloc(buf, cap);
+            void * tmp = realloc(buf, cap);
+            if (!tmp) { free(buf); sqlite3_finalize(stmt); return NULL; }
+            buf = tmp;
         }
         len += (size_t)snprintf(buf + len, cap - len, "<%s>:\n%s\n---\n", label, content);
     }
@@ -376,11 +383,14 @@ int neuronos_memory_recall_recent(neuronos_memory_t * mem, int64_t session_id,
     int count = 0;
     int cap = 32;
     neuronos_recall_entry_t * entries = calloc((size_t)cap, sizeof(neuronos_recall_entry_t));
+    if (!entries) { sqlite3_finalize(stmt); *out_entries = NULL; *out_count = 0; return -1; }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
-            entries = realloc(entries, (size_t)cap * sizeof(neuronos_recall_entry_t));
+            void * tmp = realloc(entries, (size_t)cap * sizeof(neuronos_recall_entry_t));
+            if (!tmp) { neuronos_memory_recall_free(entries, count); sqlite3_finalize(stmt); *out_entries = NULL; *out_count = 0; return -1; }
+            entries = tmp;
         }
         neuronos_recall_entry_t * e = &entries[count];
         e->id         = sqlite3_column_int64(stmt, 0);
@@ -422,11 +432,14 @@ int neuronos_memory_recall_search(neuronos_memory_t * mem, const char * query,
     int count = 0;
     int cap = 16;
     neuronos_recall_entry_t * entries = calloc((size_t)cap, sizeof(neuronos_recall_entry_t));
+    if (!entries) { sqlite3_finalize(stmt); *out_entries = NULL; *out_count = 0; return -1; }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
-            entries = realloc(entries, (size_t)cap * sizeof(neuronos_recall_entry_t));
+            void * tmp = realloc(entries, (size_t)cap * sizeof(neuronos_recall_entry_t));
+            if (!tmp) { neuronos_memory_recall_free(entries, count); sqlite3_finalize(stmt); *out_entries = NULL; *out_count = 0; return -1; }
+            entries = tmp;
         }
         neuronos_recall_entry_t * e = &entries[count];
         e->id         = sqlite3_column_int64(stmt, 0);
@@ -474,6 +487,49 @@ int neuronos_memory_recall_stats(neuronos_memory_t * mem, int64_t session_id,
     }
     sqlite3_finalize(stmt);
     return 0;
+}
+
+int neuronos_memory_recall_gc(neuronos_memory_t * mem, int64_t session_id,
+                              int max_messages, int max_age_seconds) {
+    if (!mem || !mem->db) return -1;
+    int deleted = 0;
+
+    /* 1. Delete messages older than max_age_seconds (if > 0) */
+    if (max_age_seconds > 0) {
+        const char * age_sql =
+            "DELETE FROM recall_memory "
+            "WHERE session_id=?1 AND timestamp < (strftime('%s','now') - ?2);";
+        sqlite3_stmt * stmt = NULL;
+        int rc = sqlite3_prepare_v2(mem->db, age_sql, -1, &stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, session_id);
+            sqlite3_bind_int(stmt, 2, max_age_seconds);
+            sqlite3_step(stmt);
+            deleted += sqlite3_changes(mem->db);
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    /* 2. Keep only the newest max_messages per session (if > 0) */
+    if (max_messages > 0) {
+        const char * trim_sql =
+            "DELETE FROM recall_memory "
+            "WHERE session_id=?1 AND id NOT IN ("
+            "  SELECT id FROM recall_memory WHERE session_id=?1 "
+            "  ORDER BY timestamp DESC LIMIT ?2"
+            ");";
+        sqlite3_stmt * stmt = NULL;
+        int rc = sqlite3_prepare_v2(mem->db, trim_sql, -1, &stmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, session_id);
+            sqlite3_bind_int(stmt, 2, max_messages);
+            sqlite3_step(stmt);
+            deleted += sqlite3_changes(mem->db);
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    return deleted;
 }
 
 /* ============================================================
@@ -589,11 +645,14 @@ int neuronos_memory_archival_search(neuronos_memory_t * mem, const char * query,
     int count = 0;
     int cap = 16;
     neuronos_archival_entry_t * entries = calloc((size_t)cap, sizeof(neuronos_archival_entry_t));
+    if (!entries) { sqlite3_finalize(stmt); *out_entries = NULL; *out_count = 0; return -1; }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
-            entries = realloc(entries, (size_t)cap * sizeof(neuronos_archival_entry_t));
+            void * tmp = realloc(entries, (size_t)cap * sizeof(neuronos_archival_entry_t));
+            if (!tmp) { neuronos_memory_archival_free(entries, count); sqlite3_finalize(stmt); *out_entries = NULL; *out_count = 0; return -1; }
+            entries = tmp;
         }
         neuronos_archival_entry_t * e = &entries[count];
         e->id           = sqlite3_column_int64(stmt, 0);
@@ -693,9 +752,19 @@ int neuronos_memory_search(neuronos_memory_t * mem, const char * query, char ***
 
     /* Convert to string array: "key: value" */
     char ** strs = calloc((size_t)count, sizeof(char *));
+    if (!strs) {
+        neuronos_memory_archival_free(entries, count);
+        return -1;
+    }
     for (int i = 0; i < count; i++) {
         size_t len = strlen(entries[i].key) + strlen(entries[i].value) + 4;
         strs[i] = malloc(len);
+        if (!strs[i]) {
+            for (int j = 0; j < i; j++) free(strs[j]);
+            free(strs);
+            neuronos_memory_archival_free(entries, count);
+            return -1;
+        }
         snprintf(strs[i], len, "%s: %s", entries[i].key, entries[i].value);
     }
     neuronos_memory_archival_free(entries, count);

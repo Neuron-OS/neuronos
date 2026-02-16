@@ -355,6 +355,13 @@ void neuronos_memory_recall_free(neuronos_recall_entry_t * entries, int count);
 int neuronos_memory_recall_stats(neuronos_memory_t * mem, int64_t session_id,
                                  int * out_msg_count, int * out_token_count);
 
+/* Garbage-collect recall memory for a session.
+ * max_messages: keep only the N newest messages (0 = no limit).
+ * max_age_seconds: delete messages older than this (0 = no limit).
+ * Returns number of deleted rows, or -1 on error. */
+int neuronos_memory_recall_gc(neuronos_memory_t * mem, int64_t session_id,
+                              int max_messages, int max_age_seconds);
+
 /* ---- Archival Memory (long-term facts) ---- */
 
 typedef struct {

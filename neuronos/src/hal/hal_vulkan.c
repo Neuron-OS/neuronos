@@ -82,6 +82,12 @@ neuronos_hal_status_t neuronos_hal_vulkan_init(void) {
 
     // Get all devices, select best one (prefer discrete GPU)
     VkPhysicalDevice* devices = malloc(device_count * sizeof(VkPhysicalDevice));
+    if (!devices) {
+        vkDestroyInstance(instance, NULL);
+        g_vk_device.available = false;
+        g_vk_initialized = true;
+        return NEURONOS_HAL_OK;
+    }
     vkEnumeratePhysicalDevices(instance, &device_count, devices);
 
     VkPhysicalDevice selected = VK_NULL_HANDLE;

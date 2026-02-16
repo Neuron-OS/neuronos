@@ -506,11 +506,6 @@ static int64_t estimate_params_from_quant(int64_t file_size_mb_val, neuronos_qua
     return (int64_t)((double)(file_size_mb_val) * 1024.0 * 1024.0 / (double)bpp);
 }
 
-/* Legacy wrapper */
-static int64_t estimate_params(int64_t file_size_mb_val) {
-    return estimate_params_from_quant(file_size_mb_val, NEURONOS_QUANT_I2_S);
-}
-
 /* Score a model based on hardware fit */
 static float score_model(const neuronos_model_entry_t * entry, const neuronos_hw_info_t * hw) {
     float score = 0.0f;
