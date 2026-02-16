@@ -97,12 +97,14 @@ jobs:
 
       - name: Install Vulkan SDK (macOS)
         if: runner.os == 'macOS'
+      - name: Install Vulkan SDK (macOS)
+        if: runner.os == 'macOS'
         run: |
-          brew install --cask vulkan-sdk
-          echo "VULKAN_SDK=$HOME/Library/VulkanSDK/$(ls $HOME/Library/VulkanSDK | head -n 1)/macOS" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=$HOME/Library/VulkanSDK/$(ls $HOME/Library/VulkanSDK | head -n 1)/macOS/lib" >> $GITHUB_ENV
-          echo "VK_ICD_FILENAMES=$HOME/Library/VulkanSDK/$(ls $HOME/Library/VulkanSDK | head -n 1)/macOS/share/vulkan/icd.d/MoltenVK_icd.json" >> $GITHUB_ENV
-          echo "VK_LAYER_PATH=$HOME/Library/VulkanSDK/$(ls $HOME/Library/VulkanSDK | head -n 1)/macOS/share/vulkan/explicit_layer.d" >> $GITHUB_ENV
+          brew install vulkan-headers vulkan-loader molten-vk vulkan-tools
+          echo "VULKAN_SDK=$(brew --prefix)" >> $GITHUB_ENV
+          echo "VK_ICD_FILENAMES=$(brew --prefix)/share/vulkan/icd.d/MoltenVK_icd.json" >> $GITHUB_ENV
+          echo "VK_LAYER_PATH=$(brew --prefix)/share/vulkan/explicit_layer.d" >> $GITHUB_ENV
+          echo "DYLD_LIBRARY_PATH=$(brew --prefix)/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Setup MSVC (Windows)
         if: matrix.name == 'windows-x64'

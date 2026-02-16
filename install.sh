@@ -51,14 +51,21 @@ trap cleanup EXIT
 detect_platform() {
     OS="$(uname -s)"
     ARCH="$(uname -m)"
+
+    # Android detection
+    if [ -n "${ANDROID_ROOT:-}" ] || [ -f "/system/build.prop" ]; then
+        OS="android"
+    fi
+
     case "$OS" in
         Linux)  OS="linux" ;;
-        Darwin) OS="darwin" ;;
+        Darwin) OS="macos" ;;
+        android) OS="android" ;;
         MINGW*|MSYS*|CYGWIN*) OS="windows" ;;
         *) err "Unsupported OS: $OS"; exit 1 ;;
     esac
     case "$ARCH" in
-        x86_64|amd64)  ARCH="amd64" ;;
+        x86_64|amd64)  ARCH="x86_64" ;;
         aarch64|arm64) ARCH="arm64" ;;
         *) err "Unsupported arch: $ARCH"; exit 1 ;;
     esac
