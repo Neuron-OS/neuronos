@@ -101,6 +101,7 @@ set(ENGINE_SOURCES
     src/engine/neuronos_engine.c
     src/engine/neuronos_model_selector.c
     src/engine/neuronos_model_registry.c
+    src/util/neuronos_json.c
 )
 
 add_library(neuronos_engine STATIC ${ENGINE_SOURCES})
@@ -316,6 +317,11 @@ if(NEURONOS_BUILD_TESTS)
     add_executable(test_memory tests/test_memory.c)
     target_include_directories(test_memory PRIVATE ${NEURONOS_INCLUDE_DIR})
     target_link_libraries(test_memory PRIVATE neuronos_memory ${NEURONOS_LIBM})
+
+    # JSON parser + GC test (no model needed)
+    add_executable(test_json tests/test_json.c src/util/neuronos_json.c)
+    target_include_directories(test_json PRIVATE ${NEURONOS_INCLUDE_DIR})
+    target_link_libraries(test_json PRIVATE neuronos_memory ${NEURONOS_LIBM})
 endif()
 
 # ═════════════════════════════════════════════════════════════

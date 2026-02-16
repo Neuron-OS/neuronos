@@ -1,18 +1,20 @@
 /* ============================================================
- * NeuronOS — Minimal HTTP Server (OpenAI-compatible + Agent UI)
+ * NeuronOS — Minimal HTTP Server (OpenAI + Anthropic compatible + Agent UI)
  *
  * Endpoints:
  *   POST /v1/chat/completions  — Chat API (OpenAI-compatible, SSE)
  *   POST /v1/completions       — Text completion
+ *   POST /v1/messages          — Anthropic Messages API (SSE) — Claude Code backend
  *   GET  /v1/models            — List models
  *   GET  /health               — Health check
  *   POST /api/chat             — Agent chat (SSE streaming, tool use)
  *   GET  /                     — Chat UI (agent mode) or status page
  *
  * No external dependencies — pure POSIX sockets.
- * Designed for: desktop apps, browser clients, mobile apps.
+ * Designed for: desktop apps, browser clients, mobile apps, Claude Code, OpenCode.
  * ============================================================ */
 #include "neuronos/neuronos.h"
+#include "neuronos/neuronos_json.h"
 #include "neuronos_chat_ui.h"
 
 #include <errno.h>
@@ -51,64 +53,7 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
-/* ---- JSON escape helper ---- */
-
-/**
- * Escape a string for safe embedding in JSON.
- * Returns a malloc'd buffer. Caller must free.
- */
-static char * json_escape(const char * src, size_t src_len) {
-    /* Worst case: every char becomes \uXXXX (6 chars) */
-    size_t cap = src_len * 6 + 1;
-    char * out = malloc(cap);
-    if (!out)
-        return NULL;
-
-    size_t j = 0;
-    for (size_t i = 0; i < src_len && src[i]; i++) {
-        unsigned char c = (unsigned char)src[i];
-        switch (c) {
-            case '"':
-                out[j++] = '\\';
-                out[j++] = '"';
-                break;
-            case '\\':
-                out[j++] = '\\';
-                out[j++] = '\\';
-                break;
-            case '\n':
-                out[j++] = '\\';
-                out[j++] = 'n';
-                break;
-            case '\r':
-                out[j++] = '\\';
-                out[j++] = 'r';
-                break;
-            case '\t':
-                out[j++] = '\\';
-                out[j++] = 't';
-                break;
-            case '\b':
-                out[j++] = '\\';
-                out[j++] = 'b';
-                break;
-            case '\f':
-                out[j++] = '\\';
-                out[j++] = 'f';
-                break;
-            default:
-                if (c < 0x20) {
-                    /* Control character: use \u00XX */
-                    j += (size_t)snprintf(out + j, cap - j, "\\u%04x", c);
-                } else {
-                    out[j++] = (char)c;
-                }
-                break;
-        }
-    }
-    out[j] = '\0';
-    return out;
-}
+/* JSON escape: use nj_escape() / nj_escape_n() from neuronos_json.h */
 
 /* ---- HTTP helpers ---- */
 
@@ -213,63 +158,7 @@ static void send_gzip_response(socket_t sock, const char * content_type,
     send(sock, (const char *)data, data_len, 0);
 }
 
-/* ---- Extract simple JSON string value ---- */
-static int json_get_string(const char * json, const char * key, char * out, size_t out_len) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char * found = strstr(json, pattern);
-    if (!found)
-        return -1;
-
-    /* Find the value string */
-    const char * colon = strchr(found + strlen(pattern), ':');
-    if (!colon)
-        return -1;
-
-    const char * quote1 = strchr(colon, '"');
-    if (!quote1)
-        return -1;
-    quote1++;
-
-    const char * quote2 = strchr(quote1, '"');
-    if (!quote2)
-        return -1;
-
-    size_t len = (size_t)(quote2 - quote1);
-    if (len >= out_len)
-        len = out_len - 1;
-    memcpy(out, quote1, len);
-    out[len] = '\0';
-    return 0;
-}
-
-static int json_get_int(const char * json, const char * key, int default_val) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char * found = strstr(json, pattern);
-    if (!found)
-        return default_val;
-
-    const char * colon = strchr(found + strlen(pattern), ':');
-    if (!colon)
-        return default_val;
-
-    return atoi(colon + 1);
-}
-
-static float json_get_float(const char * json, const char * key, float default_val) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char * found = strstr(json, pattern);
-    if (!found)
-        return default_val;
-
-    const char * colon = strchr(found + strlen(pattern), ':');
-    if (!colon)
-        return default_val;
-
-    return (float)atof(colon + 1);
-}
+/* JSON parsing: use nj_copy_str/nj_find_int/nj_find_float from neuronos_json.h */
 
 /* Extract content from messages array (last user message) */
 static int extract_last_user_content(const char * json, char * out, size_t out_len) {
@@ -283,7 +172,7 @@ static int extract_last_user_content(const char * json, char * out, size_t out_l
     if (!last_content)
         return -1;
 
-    return json_get_string(last_content - 1, "content", out, out_len);
+    return nj_copy_str(last_content - 1, "content", out, out_len) >= 0 ? 0 : -1;
 }
 
 /*
@@ -364,20 +253,34 @@ static parsed_msg_t * parse_messages_array(const char * json, int * out_count) {
 
         /* Extract role and content */
         char role_buf[64] = {0};
-        char content_buf[8192] = {0};
-        if (json_get_string(obj, "role", role_buf, sizeof(role_buf)) == 0 &&
-            json_get_string(obj, "content", content_buf, sizeof(content_buf)) == 0) {
+        char * content_str = NULL;
+        if (nj_copy_str(obj, "role", role_buf, sizeof(role_buf)) >= 0 &&
+            (content_str = nj_alloc_str(obj, "content")) != NULL) {
             if (count >= cap) {
                 cap *= 2;
                 msgs = realloc(msgs, (size_t)cap * sizeof(parsed_msg_t));
                 if (!msgs) {
+                    free(content_str);
                     free(obj);
                     *out_count = 0;
                     return NULL;
                 }
             }
             msgs[count].role = strdup(role_buf);
-            msgs[count].content = strdup(content_buf);
+            msgs[count].content = content_str; /* already allocated */
+            if (!msgs[count].role || !msgs[count].content) {
+                free(msgs[count].role);
+                free(msgs[count].content);
+                free(obj);
+                /* Free previously allocated messages */
+                for (int j = 0; j < count; j++) {
+                    free(msgs[j].role);
+                    free(msgs[j].content);
+                }
+                free(msgs);
+                *out_count = 0;
+                return NULL;
+            }
             count++;
         }
 
@@ -426,14 +329,14 @@ static void handle_completions(socket_t sock, const char * body) {
     }
 
     char prompt[8192] = {0};
-    json_get_string(body, "prompt", prompt, sizeof(prompt));
+    nj_copy_str(body, "prompt", prompt, sizeof(prompt));
     if (prompt[0] == '\0') {
         send_json(sock, 400, "{\"error\":{\"message\":\"Missing prompt\"}}");
         return;
     }
 
-    int max_tokens = json_get_int(body, "max_tokens", 256);
-    float temperature = json_get_float(body, "temperature", 0.7f);
+    int max_tokens = nj_find_int(body, "max_tokens", 256);
+    float temperature = nj_find_float(body, "temperature", 0.7f);
 
     neuronos_gen_params_t gparams = {
         .prompt = prompt,
@@ -451,7 +354,7 @@ static void handle_completions(socket_t sock, const char * body) {
 
     if (result.status == NEURONOS_OK && result.text) {
         /* JSON-escape the generated text */
-        char * escaped = json_escape(result.text, strlen(result.text));
+        char * escaped = nj_escape(result.text);
         if (!escaped) {
             send_json(sock, 500, "{\"error\":{\"message\":\"Memory allocation failed\"}}");
             neuronos_gen_result_free(&result);
@@ -509,7 +412,7 @@ static bool sse_token_callback(const char * token_text, void * user_data) {
         return false;
 
     /* JSON-escape the token text */
-    char * escaped = json_escape(token_text, strlen(token_text));
+    char * escaped = nj_escape(token_text);
     if (!escaped)
         return false;
 
@@ -546,26 +449,7 @@ static void send_sse_headers(socket_t sock) {
     send(sock, headers, strlen(headers), 0);
 }
 
-/* Detect "stream": true in JSON body */
-static bool json_get_bool(const char * json, const char * key, bool default_val) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char * found = strstr(json, pattern);
-    if (!found)
-        return default_val;
-    const char * colon = strchr(found + strlen(pattern), ':');
-    if (!colon)
-        return default_val;
-    /* skip whitespace */
-    colon++;
-    while (*colon == ' ' || *colon == '\t')
-        colon++;
-    if (strncmp(colon, "true", 4) == 0)
-        return true;
-    if (strncmp(colon, "false", 5) == 0)
-        return false;
-    return default_val;
-}
+/* JSON bool: use nj_find_bool() from neuronos_json.h */
 
 static void handle_chat_completions(socket_t sock, const char * body) {
     if (!g_model) {
@@ -582,6 +466,11 @@ static void handle_chat_completions(socket_t sock, const char * body) {
     if (parsed && msg_count > 0) {
         /* Build neuronos_chat_msg_t array from parsed messages */
         neuronos_chat_msg_t * chat_msgs = calloc((size_t)msg_count, sizeof(neuronos_chat_msg_t));
+        if (!chat_msgs) {
+            free_parsed_msgs(parsed, msg_count);
+            send_json(sock, 500, "{\"error\":{\"message\":\"Memory allocation failed\"}}");
+            return;
+        }
         if (chat_msgs) {
             for (int i = 0; i < msg_count; i++) {
                 chat_msgs[i].role = parsed[i].role;
@@ -605,9 +494,9 @@ static void handle_chat_completions(socket_t sock, const char * body) {
 
     const char * effective_prompt = formatted_prompt ? formatted_prompt : content_fallback;
 
-    int max_tokens = json_get_int(body, "max_tokens", 256);
-    float temperature = json_get_float(body, "temperature", 0.7f);
-    bool stream = json_get_bool(body, "stream", false);
+    int max_tokens = nj_find_int(body, "max_tokens", 256);
+    float temperature = nj_find_float(body, "temperature", 0.7f);
+    bool stream = nj_find_bool(body, "stream", false);
 
     if (stream) {
         /* ── SSE Streaming mode ── */
@@ -671,7 +560,7 @@ static void handle_chat_completions(socket_t sock, const char * body) {
 
         if (result.status == NEURONOS_OK && result.text) {
             /* JSON-escape the generated text */
-            char * escaped = json_escape(result.text, strlen(result.text));
+            char * escaped = nj_escape(result.text);
             if (!escaped) {
                 send_json(sock, 500, "{\"error\":{\"message\":\"Memory allocation failed\"}}");
                 neuronos_gen_result_free(&result);
@@ -719,6 +608,269 @@ static void handle_chat_completions(socket_t sock, const char * body) {
     }
 
     neuronos_free(formatted_prompt);
+    free_parsed_msgs(parsed, msg_count);
+}
+
+/* ---- Anthropic Messages API (Claude Code backend) ---- */
+
+/**
+ * Parse Anthropic-format "system" field.
+ * Anthropic puts system prompt as a top-level field, not in messages.
+ * Supports: "system": "text" (string form).
+ * Returns malloc'd string or NULL.
+ */
+static char * parse_anthropic_system(const char * json) {
+    char buf[8192] = {0};
+    if (nj_copy_str(json, "system", buf, sizeof(buf)) >= 0 && buf[0] != '\0') {
+        return strdup(buf);
+    }
+    return NULL;
+}
+
+/**
+ * SSE callback for Anthropic streaming format.
+ * Sends content_block_delta events with text_delta.
+ */
+typedef struct {
+    socket_t sock;
+    int n_tokens;
+} anthropic_stream_ctx_t;
+
+static bool anthropic_sse_token_callback(const char * token_text, void * user_data) {
+    anthropic_stream_ctx_t * ctx = (anthropic_stream_ctx_t *)user_data;
+    if (!ctx || !token_text)
+        return false;
+
+    char * escaped = nj_escape(token_text);
+    if (!escaped)
+        return false;
+
+    /* Anthropic streaming format:
+     * event: content_block_delta
+     * data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"..."}}
+     */
+    char chunk[4096];
+    int len = snprintf(chunk, sizeof(chunk),
+                       "event: content_block_delta\n"
+                       "data: {\"type\":\"content_block_delta\",\"index\":0,"
+                       "\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}\n\n",
+                       escaped);
+    free(escaped);
+
+    ssize_t sent = send(ctx->sock, chunk, (size_t)len, 0);
+    ctx->n_tokens++;
+
+    return (sent > 0);
+}
+
+/**
+ * POST /v1/messages — Anthropic Messages API
+ *
+ * Request:  { model, max_tokens, system?, messages, stream?, temperature? }
+ * Response: { id, type:"message", role, content:[{type:"text",text}], stop_reason, usage }
+ * Streaming: message_start → content_block_start → content_block_delta* →
+ *            content_block_stop → message_delta → message_stop
+ */
+static void handle_anthropic_messages(socket_t sock, const char * body) {
+    if (!g_model) {
+        /* Anthropic error format */
+        send_json(sock, 503,
+                  "{\"type\":\"error\",\"error\":{\"type\":\"api_error\","
+                  "\"message\":\"No model loaded\"}}");
+        return;
+    }
+
+    /* Parse Anthropic-specific fields */
+    char * system_prompt = parse_anthropic_system(body);
+    int max_tokens = nj_find_int(body, "max_tokens", 1024);
+    float temperature = nj_find_float(body, "temperature", 0.7f);
+    bool stream = nj_find_bool(body, "stream", false);
+
+    /* Parse messages array (same format as OpenAI: [{role, content}]) */
+    int msg_count = 0;
+    parsed_msg_t * parsed = parse_messages_array(body, &msg_count);
+
+    if (!parsed || msg_count == 0) {
+        free(system_prompt);
+        send_json(sock, 400,
+                  "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+                  "\"message\":\"Missing or empty messages array\"}}");
+        return;
+    }
+
+    /*
+     * Build chat messages for neuronos_chat_format().
+     * Anthropic puts system prompt in a separate field, so we prepend it
+     * as a system message if present.
+     */
+    int total_msgs = msg_count + (system_prompt ? 1 : 0);
+    neuronos_chat_msg_t * chat_msgs = calloc((size_t)total_msgs, sizeof(neuronos_chat_msg_t));
+    char * formatted_prompt = NULL;
+
+    if (chat_msgs) {
+        int offset = 0;
+        if (system_prompt) {
+            chat_msgs[0].role = "system";
+            chat_msgs[0].content = system_prompt;
+            offset = 1;
+        }
+        for (int i = 0; i < msg_count; i++) {
+            chat_msgs[offset + i].role = parsed[i].role;
+            chat_msgs[offset + i].content = parsed[i].content;
+        }
+
+        neuronos_chat_format(g_model, NULL, chat_msgs, (size_t)total_msgs, true, &formatted_prompt);
+        free(chat_msgs);
+    }
+
+    /* Fallback: extract last user content */
+    char content_fallback[8192] = {0};
+    if (!formatted_prompt) {
+        if (extract_last_user_content(body, content_fallback, sizeof(content_fallback)) != 0) {
+            free(system_prompt);
+            free_parsed_msgs(parsed, msg_count);
+            send_json(sock, 400,
+                      "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+                      "\"message\":\"Missing messages content\"}}");
+            return;
+        }
+    }
+
+    const char * effective_prompt = formatted_prompt ? formatted_prompt : content_fallback;
+
+    if (stream) {
+        /* ── Anthropic SSE Streaming ── */
+        send_sse_headers(sock);
+
+        /* Event 1: message_start */
+        const char * msg_start =
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\",\"message\":"
+            "{\"id\":\"msg_neuronos_01\",\"type\":\"message\",\"role\":\"assistant\","
+            "\"content\":[],\"model\":\"neuronos-local\",\"stop_reason\":null,"
+            "\"stop_sequence\":null,"
+            "\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n";
+        send(sock, msg_start, strlen(msg_start), 0);
+
+        /* Event 2: content_block_start */
+        const char * block_start =
+            "event: content_block_start\n"
+            "data: {\"type\":\"content_block_start\",\"index\":0,"
+            "\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n";
+        send(sock, block_start, strlen(block_start), 0);
+
+        /* Event 3 (repeated): content_block_delta — via token callback */
+        anthropic_stream_ctx_t ctx = {.sock = sock, .n_tokens = 0};
+
+        neuronos_gen_params_t gparams = {
+            .prompt = effective_prompt,
+            .max_tokens = max_tokens,
+            .temperature = temperature,
+            .top_p = 0.95f,
+            .top_k = 40,
+            .grammar = NULL,
+            .on_token = anthropic_sse_token_callback,
+            .user_data = &ctx,
+            .seed = 0,
+        };
+
+        neuronos_gen_result_t result = neuronos_generate(g_model, gparams);
+
+        /* Event 4: content_block_stop */
+        const char * block_stop =
+            "event: content_block_stop\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n";
+        send(sock, block_stop, strlen(block_stop), 0);
+
+        /* Event 5: message_delta (with final usage) */
+        char msg_delta[512];
+        snprintf(msg_delta, sizeof(msg_delta),
+                 "event: message_delta\n"
+                 "data: {\"type\":\"message_delta\","
+                 "\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},"
+                 "\"usage\":{\"output_tokens\":%d}}\n\n",
+                 ctx.n_tokens);
+        send(sock, msg_delta, strlen(msg_delta), 0);
+
+        /* Event 6: message_stop */
+        const char * msg_stop =
+            "event: message_stop\n"
+            "data: {\"type\":\"message_stop\"}\n\n";
+        send(sock, msg_stop, strlen(msg_stop), 0);
+
+        neuronos_gen_result_free(&result);
+    } else {
+        /* ── Non-streaming Anthropic response ── */
+        neuronos_gen_params_t gparams = {
+            .prompt = effective_prompt,
+            .max_tokens = max_tokens,
+            .temperature = temperature,
+            .top_p = 0.95f,
+            .top_k = 40,
+            .grammar = NULL,
+            .on_token = NULL,
+            .user_data = NULL,
+            .seed = 0,
+        };
+
+        neuronos_gen_result_t result = neuronos_generate(g_model, gparams);
+
+        if (result.status == NEURONOS_OK && result.text) {
+            char * escaped = nj_escape(result.text);
+            if (!escaped) {
+                send_json(sock, 500,
+                          "{\"type\":\"error\",\"error\":{\"type\":\"api_error\","
+                          "\"message\":\"Memory allocation failed\"}}");
+                neuronos_gen_result_free(&result);
+                neuronos_free(formatted_prompt);
+                free(system_prompt);
+                free_parsed_msgs(parsed, msg_count);
+                return;
+            }
+
+            /* Anthropic Messages response format */
+            size_t resp_cap = strlen(escaped) + 512;
+            char * response = malloc(resp_cap);
+            if (!response) {
+                free(escaped);
+                send_json(sock, 500,
+                          "{\"type\":\"error\",\"error\":{\"type\":\"api_error\","
+                          "\"message\":\"Memory allocation failed\"}}");
+                neuronos_gen_result_free(&result);
+                neuronos_free(formatted_prompt);
+                free(system_prompt);
+                free_parsed_msgs(parsed, msg_count);
+                return;
+            }
+
+            snprintf(response, resp_cap,
+                     "{\"id\":\"msg_neuronos_01\","
+                     "\"type\":\"message\","
+                     "\"role\":\"assistant\","
+                     "\"content\":[{\"type\":\"text\",\"text\":\"%s\"}],"
+                     "\"model\":\"neuronos-local\","
+                     "\"stop_reason\":\"end_turn\","
+                     "\"stop_sequence\":null,"
+                     "\"usage\":{"
+                     "\"input_tokens\":0,"
+                     "\"output_tokens\":%d"
+                     "}}",
+                     escaped, result.n_tokens);
+
+            send_json(sock, 200, response);
+            free(response);
+            free(escaped);
+        } else {
+            send_json(sock, 500,
+                      "{\"type\":\"error\",\"error\":{\"type\":\"api_error\","
+                      "\"message\":\"Generation failed\"}}");
+        }
+
+        neuronos_gen_result_free(&result);
+    }
+
+    neuronos_free(formatted_prompt);
+    free(system_prompt);
     free_parsed_msgs(parsed, msg_count);
 }
 
@@ -772,7 +924,7 @@ static void agent_sse_step_cb(int step, const char * thought, const char * actio
 
     /* Send thinking event */
     if (thought && action && strcmp(action, "reply") != 0) {
-        char * esc = json_escape(thought, strlen(thought));
+        char * esc = nj_escape(thought);
         if (esc) {
             char ev[8192];
             snprintf(ev, sizeof(ev), "{\"type\":\"thinking\",\"text\":\"%s\"}", esc);
@@ -787,7 +939,7 @@ static void agent_sse_step_cb(int step, const char * thought, const char * actio
 
         if (!observation) {
             /* First callback for this step: tool invocation */
-            char * esc_act = json_escape(action, strlen(action));
+            char * esc_act = nj_escape(action);
             if (esc_act) {
                 char ev[4096];
                 snprintf(ev, sizeof(ev), "{\"type\":\"tool\",\"name\":\"%s\"}", esc_act);
@@ -799,7 +951,7 @@ static void agent_sse_step_cb(int step, const char * thought, const char * actio
             size_t obs_len = strlen(observation);
             if (obs_len > 500)
                 obs_len = 500;
-            char * esc_obs = json_escape(observation, obs_len);
+            char * esc_obs = nj_escape_n(observation, obs_len);
             if (esc_obs) {
                 char ev[8192];
                 snprintf(ev, sizeof(ev), "{\"type\":\"observation\",\"text\":\"%s\"}", esc_obs);
@@ -819,7 +971,7 @@ static void handle_agent_chat(socket_t sock, const char * body) {
 
     /* Extract message from body: {"message": "user text"} */
     char message[8192] = {0};
-    if (json_get_string(body, "message", message, sizeof(message)) != 0) {
+    if (nj_copy_str(body, "message", message, sizeof(message)) < 0) {
         send_json(sock, 400, "{\"error\":{\"message\":\"Missing 'message' field\"}}");
         return;
     }
@@ -833,7 +985,7 @@ static void handle_agent_chat(socket_t sock, const char * body) {
 
     /* Send final response event */
     if (result.status == NEURONOS_OK && result.text) {
-        char * esc = json_escape(result.text, strlen(result.text));
+        char * esc = nj_escape(result.text);
         if (esc) {
             /* Build response event with capacity for escaped text */
             size_t ev_cap = strlen(esc) + 256;
@@ -951,6 +1103,8 @@ neuronos_status_t neuronos_server_start(neuronos_model_t * model, neuronos_tool_
                     handle_completions(client_fd, req.body);
                 } else if (strcmp(req.path, "/v1/chat/completions") == 0 && strcmp(req.method, "POST") == 0) {
                     handle_chat_completions(client_fd, req.body);
+                } else if (strcmp(req.path, "/v1/messages") == 0 && strcmp(req.method, "POST") == 0) {
+                    handle_anthropic_messages(client_fd, req.body);
                 } else if (strcmp(req.path, "/api/chat") == 0 && strcmp(req.method, "POST") == 0) {
                     handle_agent_chat(client_fd, req.body);
                 } else if (strcmp(req.path, "/") == 0) {

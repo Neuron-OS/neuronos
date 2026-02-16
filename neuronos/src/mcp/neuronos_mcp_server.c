@@ -16,6 +16,7 @@
  * SPDX-License-Identifier: MIT
  * ============================================================ */
 #include "neuronos/neuronos.h"
+#include "neuronos/neuronos_json.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,140 +28,7 @@
 #define MCP_SERVER_NAME "neuronos"
 #define MCP_SERVER_VERSION NEURONOS_VERSION_STRING
 
-/* ---- Minimal JSON helpers ----
- * We avoid external deps. These handle the subset we need. */
-
-/* Extract a string value for a key from JSON (no nesting, top-level only).
- * Returns pointer into json (not NUL-terminated) and sets *len. */
-static const char * json_find_str(const char * json, const char * key, int * len) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char * p = strstr(json, pattern);
-    if (!p)
-        return NULL;
-    p += strlen(pattern);
-    /* skip : and whitespace */
-    while (*p == ' ' || *p == ':' || *p == '\t' || *p == '\n')
-        p++;
-    if (*p != '"')
-        return NULL;
-    p++; /* skip opening quote */
-    const char * end = p;
-    while (*end && *end != '"') {
-        if (*end == '\\')
-            end++; /* skip escaped char */
-        end++;
-    }
-    *len = (int)(end - p);
-    return p;
-}
-
-/* Extract integer value for a key. Returns -1 if not found. */
-static int json_find_int(const char * json, const char * key) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char * p = strstr(json, pattern);
-    if (!p)
-        return -1;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == ':' || *p == '\t' || *p == '\n')
-        p++;
-    if (*p == '-' || (*p >= '0' && *p <= '9'))
-        return atoi(p);
-    /* Check for null */
-    if (strncmp(p, "null", 4) == 0)
-        return -1;
-    return -1;
-}
-
-/* Extract the "params" object as a substring (including braces).
- * Returns malloc'd string or NULL. */
-static char * json_extract_object(const char * json, const char * key) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char * p = strstr(json, pattern);
-    if (!p)
-        return NULL;
-    p += strlen(pattern);
-    while (*p == ' ' || *p == ':' || *p == '\t' || *p == '\n')
-        p++;
-    if (*p != '{')
-        return NULL;
-
-    /* Find matching close brace */
-    int depth = 0;
-    const char * start = p;
-    bool in_string = false;
-    while (*p) {
-        if (*p == '"' && (p == start || *(p - 1) != '\\'))
-            in_string = !in_string;
-        if (!in_string) {
-            if (*p == '{')
-                depth++;
-            else if (*p == '}')
-                depth--;
-            if (depth == 0) {
-                p++;
-                break;
-            }
-        }
-        p++;
-    }
-
-    size_t len = (size_t)(p - start);
-    char * result = malloc(len + 1);
-    if (result) {
-        memcpy(result, start, len);
-        result[len] = '\0';
-    }
-    return result;
-}
-
-/* ---- JSON output helpers ---- */
-
-/* Escape a string for JSON output. Caller must free. */
-static char * json_escape(const char * s) {
-    if (!s)
-        return strdup("null");
-    size_t cap = strlen(s) * 2 + 3;
-    char * out = malloc(cap);
-    if (!out)
-        return NULL;
-    size_t j = 0;
-    for (size_t i = 0; s[i] && j < cap - 2; i++) {
-        switch (s[i]) {
-            case '"':
-                out[j++] = '\\';
-                out[j++] = '"';
-                break;
-            case '\\':
-                out[j++] = '\\';
-                out[j++] = '\\';
-                break;
-            case '\n':
-                out[j++] = '\\';
-                out[j++] = 'n';
-                break;
-            case '\r':
-                out[j++] = '\\';
-                out[j++] = 'r';
-                break;
-            case '\t':
-                out[j++] = '\\';
-                out[j++] = 't';
-                break;
-            default:
-                if ((unsigned char)s[i] < 0x20) {
-                    j += (size_t)snprintf(out + j, cap - j, "\\u%04x", (unsigned char)s[i]);
-                } else {
-                    out[j++] = s[i];
-                }
-                break;
-        }
-    }
-    out[j] = '\0';
-    return out;
-}
+/* JSON helpers provided by neuronos/neuronos_json.h (nj_*) */
 
 /* Write a JSON-RPC response to stdout (newline-delimited) */
 static void mcp_send(const char * json) {
@@ -251,7 +119,7 @@ static void handle_tools_list(int id, neuronos_tool_registry_t * tools) {
         if (i > 0)
             buf[pos++] = ',';
 
-        char * esc_desc = json_escape(desc ? desc : "");
+        char * esc_desc = nj_escape(desc ? desc : "");
 
         /* Tool object: name, description, inputSchema */
         pos += (size_t)snprintf(buf + pos, cap - pos,
@@ -293,7 +161,7 @@ static void handle_tools_call(int id, const char * params, neuronos_tool_registr
 
     /* Extract tool name */
     int name_len = 0;
-    const char * name_ptr = json_find_str(params, "name", &name_len);
+    const char * name_ptr = nj_find_str(params, "name", &name_len);
     if (!name_ptr || name_len <= 0) {
         mcp_send_error(id, -32602, "Missing 'name' in params");
         return;
@@ -305,7 +173,7 @@ static void handle_tools_call(int id, const char * params, neuronos_tool_registr
     memcpy(tool_name, name_ptr, (size_t)name_len);
 
     /* Extract arguments object */
-    char * args = json_extract_object(params, "arguments");
+    char * args = nj_extract_object(params, "arguments");
     const char * args_str = args ? args : "{}";
 
     fprintf(stderr, "[mcp] tools/call → %s(%s)\n", tool_name, args_str);
@@ -323,7 +191,7 @@ static void handle_tools_call(int id, const char * params, neuronos_tool_registr
         return;
     }
 
-    char * esc_output = json_escape(result.success ? result.output : result.error);
+    char * esc_output = nj_escape(result.success ? result.output : result.error);
 
     snprintf(buf, cap,
              "{\"jsonrpc\":\"2.0\",\"id\":%d,"
@@ -376,10 +244,10 @@ neuronos_status_t neuronos_mcp_serve_stdio(neuronos_tool_registry_t * tools) {
             continue; /* skip empty lines */
 
         /* Parse JSON-RPC envelope: extract method and id */
-        int msg_id = json_find_int(line, "id");
+        int msg_id = nj_find_int(line, "id", -1);
 
         int method_len = 0;
-        const char * method_ptr = json_find_str(line, "method", &method_len);
+        const char * method_ptr = nj_find_str(line, "method", &method_len);
 
         if (!method_ptr) {
             /* Might be a response or notification — ignore for now */
@@ -420,7 +288,7 @@ neuronos_status_t neuronos_mcp_serve_stdio(neuronos_tool_registry_t * tools) {
                 mcp_send_error(msg_id, -32002, "Server not initialized");
                 continue;
             }
-            char * params = json_extract_object(line, "params");
+            char * params = nj_extract_object(line, "params");
             handle_tools_call(msg_id, params, tools);
             free(params);
 

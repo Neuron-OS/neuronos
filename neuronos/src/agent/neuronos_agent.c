@@ -7,6 +7,7 @@
  * and repeat until "answer" or max_steps.
  * ============================================================ */
 #include "neuronos/neuronos.h"
+#include "neuronos/neuronos_json.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,7 +185,12 @@ static char * compact_step_summary(const char ** step_actions, const char ** ste
 
         /* Grow buffer if needed */
         size_t need = strlen(act) + 80;
-        while (len + need > cap) { cap *= 2; summary = realloc(summary, cap); }
+        while (len + need > cap) {
+            cap *= 2;
+            void * tmp = realloc(summary, cap);
+            if (!tmp) { free(summary); return NULL; }
+            summary = tmp;
+        }
 
         /* Truncate long observations in the summary */
         if (obs_len > 80) {
@@ -196,7 +202,12 @@ static char * compact_step_summary(const char ** step_actions, const char ** ste
         }
     }
 
-    while (len + 2 > cap) { cap *= 2; summary = realloc(summary, cap); }
+    while (len + 2 > cap) {
+        cap *= 2;
+        void * tmp = realloc(summary, cap);
+        if (!tmp) { free(summary); return NULL; }
+        summary = tmp;
+    }
     len += (size_t)snprintf(summary + len, cap - len, "]");
     return summary;
 }
@@ -232,92 +243,7 @@ static double get_time_ms(void) {
 #endif
 }
 
-/*
- * Minimal JSON string extractor.
- * Finds "key": "value" and returns a newly allocated copy of value.
- * Returns NULL if not found.
- */
-static char * json_extract_string(const char * json, const char * key) {
-    /* Build search pattern: "key" */
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-
-    const char * pos = strstr(json, pattern);
-    if (!pos)
-        return NULL;
-
-    /* Skip past key and colon */
-    pos += strlen(pattern);
-    while (*pos == ' ' || *pos == '\t' || *pos == ':')
-        pos++;
-
-    /* Expect opening quote */
-    if (*pos != '"')
-        return NULL;
-    pos++;
-
-    /* Find closing quote, handling escapes */
-    const char * start = pos;
-    while (*pos && !(*pos == '"' && *(pos - 1) != '\\')) {
-        pos++;
-    }
-
-    size_t len = (size_t)(pos - start);
-    char * val = malloc(len + 1);
-    if (!val)
-        return NULL;
-    memcpy(val, start, len);
-    val[len] = '\0';
-
-    return val;
-}
-
-/*
- * Extract "args" as a raw JSON object: everything between { and matching }
- */
-static char * json_extract_object(const char * json, const char * key) {
-    char pattern[128];
-    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-
-    const char * pos = strstr(json, pattern);
-    if (!pos)
-        return NULL;
-
-    pos += strlen(pattern);
-    while (*pos && *pos != '{')
-        pos++;
-    if (*pos != '{')
-        return NULL;
-
-    /* Find matching closing brace */
-    const char * start = pos;
-    int depth = 0;
-    bool in_string = false;
-
-    while (*pos) {
-        if (*pos == '"' && (pos == start || *(pos - 1) != '\\')) {
-            in_string = !in_string;
-        }
-        if (!in_string) {
-            if (*pos == '{')
-                depth++;
-            else if (*pos == '}') {
-                depth--;
-                if (depth == 0) {
-                    pos++; /* include closing brace */
-                    size_t len = (size_t)(pos - start);
-                    char * obj = malloc(len + 1);
-                    memcpy(obj, start, len);
-                    obj[len] = '\0';
-                    return obj;
-                }
-            }
-        }
-        pos++;
-    }
-
-    return NULL;
-}
+/* JSON parsing: use nj_alloc_str/nj_extract_object from neuronos_json.h */
 
 /*
  * Build the conversation prompt for the current step using chat template.
@@ -383,6 +309,12 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
             const char * tool = step_actions[i] ? step_actions[i] : "tool";
             size_t obs_len = strlen("Observation from : ") + strlen(tool) + strlen(step_observations[i]) + 1;
             obs_bufs[obs_idx] = malloc(obs_len);
+            if (!obs_bufs[obs_idx]) {
+                for (int j = 0; j < obs_idx; j++) free(obs_bufs[j]);
+                free(obs_bufs);
+                free(msgs);
+                return NULL;
+            }
             snprintf(obs_bufs[obs_idx], obs_len, "Observation from %s: %s", tool, step_observations[i]);
             msgs[idx].role = "user";
             msgs[idx].content = obs_bufs[obs_idx];
@@ -421,24 +353,32 @@ static char * build_prompt(const neuronos_agent_t * agent, const char * user_inp
         return NULL;
 
     size_t len = 0;
-    len += (size_t)sprintf(prompt + len, "%s\n", agent->system_prompt);
-    len += (size_t)sprintf(prompt + len, "User: %s\n\n", user_input);
+    size_t rem = total;
+    int n;
+
+    n = snprintf(prompt + len, rem, "%s\n", agent->system_prompt);
+    if (n > 0) { len += (size_t)n; rem = (len < total) ? total - len : 0; }
+    n = snprintf(prompt + len, rem, "User: %s\n\n", user_input);
+    if (n > 0) { len += (size_t)n; rem = (len < total) ? total - len : 0; }
 
     if (context_summary) {
-        len += (size_t)sprintf(prompt + len, "%s\n\n", context_summary);
+        n = snprintf(prompt + len, rem, "%s\n\n", context_summary);
+        if (n > 0) { len += (size_t)n; rem = (len < total) ? total - len : 0; }
     }
 
     for (int i = first_step; i < n_steps; i++) {
         if (step_outputs[i]) {
-            len += (size_t)sprintf(prompt + len, "Assistant: %s\n", step_outputs[i]);
+            n = snprintf(prompt + len, rem, "Assistant: %s\n", step_outputs[i]);
+            if (n > 0) { len += (size_t)n; rem = (len < total) ? total - len : 0; }
         }
         if (step_observations[i]) {
-            len += (size_t)sprintf(prompt + len, "Observation from %s: %s\n\n",
-                                   step_actions[i] ? step_actions[i] : "tool", step_observations[i]);
+            n = snprintf(prompt + len, rem, "Observation from %s: %s\n\n",
+                         step_actions[i] ? step_actions[i] : "tool", step_observations[i]);
+            if (n > 0) { len += (size_t)n; rem = (len < total) ? total - len : 0; }
         }
     }
 
-    len += (size_t)sprintf(prompt + len, "Assistant: ");
+    snprintf(prompt + len, rem, "Assistant: ");
     return prompt;
 }
 
@@ -475,6 +415,12 @@ neuronos_agent_t * neuronos_agent_create(neuronos_model_t * model, neuronos_tool
     agent->conv_cap = 32;
     agent->conv_roles = calloc(agent->conv_cap, sizeof(char *));
     agent->conv_contents = calloc(agent->conv_cap, sizeof(char *));
+    if (!agent->conv_roles || !agent->conv_contents) {
+        free(agent->conv_roles);
+        free(agent->conv_contents);
+        free(agent);
+        return NULL;
+    }
     agent->conv_len = 0;
 
     /* Select system prompt based on model size */
@@ -503,11 +449,21 @@ neuronos_agent_t * neuronos_agent_create(neuronos_model_t * model, neuronos_tool
     /* One-shot prompt (for agent_run) */
     size_t prompt_size = strlen(oneshot_template) + strlen(tool_desc) + 64;
     agent->system_prompt = malloc(prompt_size);
+    if (!agent->system_prompt) {
+        free(tool_desc);
+        neuronos_agent_free(agent);
+        return NULL;
+    }
     snprintf(agent->system_prompt, prompt_size, oneshot_template, tool_desc);
 
     /* Interactive prompt (for agent_chat) */
     size_t iprompt_size = strlen(interactive_template) + strlen(tool_desc) + 64;
     agent->interactive_prompt = malloc(iprompt_size);
+    if (!agent->interactive_prompt) {
+        free(tool_desc);
+        neuronos_agent_free(agent);
+        return NULL;
+    }
     snprintf(agent->interactive_prompt, iprompt_size, interactive_template, tool_desc);
 
     free(tool_desc);
@@ -568,6 +524,10 @@ static char * build_memory_enriched_prompt(const neuronos_agent_t * agent, const
     /* Build enriched prompt */
     size_t len = strlen(base_prompt) + (core_dump ? strlen(core_dump) : 0) + 512;
     char * enriched = malloc(len);
+    if (!enriched) {
+        free(core_dump);
+        return NULL;
+    }
     snprintf(enriched, len,
         "%s\n"
         "### Core Memory ###\n"
@@ -671,6 +631,10 @@ neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char 
                         /* Merge old + new summary */
                         size_t merged_len = strlen(context_summary) + strlen(new_summary) + 4;
                         char * merged = malloc(merged_len);
+                        if (!merged) {
+                            free(new_summary);
+                            break;
+                        }
                         snprintf(merged, merged_len, "%s %s", context_summary, new_summary);
                         free(context_summary);
                         free(new_summary);
@@ -742,10 +706,10 @@ neuronos_agent_result_t neuronos_agent_run(neuronos_agent_t * agent, const char 
         steps_taken++;
 
         /* Parse the JSON response */
-        char * thought = json_extract_string(gen.text, "thought");
-        char * answer = json_extract_string(gen.text, "answer");
-        char * action = json_extract_string(gen.text, "action");
-        char * args = json_extract_object(gen.text, "args");
+        char * thought = nj_alloc_str(gen.text, "thought");
+        char * answer = nj_alloc_str(gen.text, "answer");
+        char * action = nj_alloc_str(gen.text, "action");
+        char * args = nj_extract_object(gen.text, "args");
 
         neuronos_gen_result_free(&gen);
 
@@ -899,6 +863,13 @@ static void conv_history_push(neuronos_agent_t * agent, const char * role, const
 
     agent->conv_roles[agent->conv_len] = strdup(role);
     agent->conv_contents[agent->conv_len] = strdup(content);
+    if (!agent->conv_roles[agent->conv_len] || !agent->conv_contents[agent->conv_len]) {
+        free(agent->conv_roles[agent->conv_len]);
+        free(agent->conv_contents[agent->conv_len]);
+        agent->conv_roles[agent->conv_len] = NULL;
+        agent->conv_contents[agent->conv_len] = NULL;
+        return;
+    }
     agent->conv_len++;
 }
 
@@ -911,35 +882,7 @@ void neuronos_agent_clear_history(neuronos_agent_t * agent) {
     agent->conv_len = 0;
 }
 
-/*
- * Unescape a JSON string value (handle \\n, \\t, \\", \\\\, etc.)
- * Returns newly allocated string. Caller must free.
- */
-static char * json_unescape(const char * s) {
-    if (!s) return NULL;
-    size_t len = strlen(s);
-    char * out = malloc(len + 1);
-    if (!out) return NULL;
-
-    size_t j = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\\' && i + 1 < len) {
-            switch (s[i + 1]) {
-            case 'n':  out[j++] = '\n'; i++; break;
-            case 't':  out[j++] = '\t'; i++; break;
-            case 'r':  out[j++] = '\r'; i++; break;
-            case '"':  out[j++] = '"';  i++; break;
-            case '\\': out[j++] = '\\'; i++; break;
-            case '/':  out[j++] = '/';  i++; break;
-            default:   out[j++] = s[i]; break;
-            }
-        } else {
-            out[j++] = s[i];
-        }
-    }
-    out[j] = '\0';
-    return out;
-}
+/* JSON unescape: use nj_unescape() from neuronos_json.h */
 
 /*
  * Build the interactive prompt from conversation history + current turn steps.
@@ -997,6 +940,12 @@ static char * build_interactive_prompt(const neuronos_agent_t * agent,
             const char * tool = step_actions[i] ? step_actions[i] : "tool";
             size_t obs_len = strlen("Observation from : ") + strlen(tool) + strlen(step_observations[i]) + 1;
             obs_bufs[i] = malloc(obs_len);
+            if (!obs_bufs[i]) {
+                for (int j = 0; j < i; j++) free(obs_bufs[j]);
+                free(obs_bufs);
+                free(msgs);
+                return NULL;
+            }
             snprintf(obs_bufs[i], obs_len, "Observation from %s: %s", tool, step_observations[i]);
             msgs[idx].role = "user";
             msgs[idx].content = obs_bufs[i];
@@ -1117,15 +1066,15 @@ neuronos_agent_result_t neuronos_agent_chat(neuronos_agent_t * agent, const char
         steps_taken++;
 
         /* Parse the JSON response — check for reply, action, or answer */
-        char * reply = json_extract_string(gen.text, "reply");
-        char * thought = json_extract_string(gen.text, "thought");
-        char * answer = json_extract_string(gen.text, "answer");
-        char * action = json_extract_string(gen.text, "action");
-        char * args = json_extract_object(gen.text, "args");
+        char * reply = nj_alloc_str(gen.text, "reply");
+        char * thought = nj_alloc_str(gen.text, "thought");
+        char * answer = nj_alloc_str(gen.text, "answer");
+        char * action = nj_alloc_str(gen.text, "action");
+        char * args = nj_extract_object(gen.text, "args");
 
         /* ---- Direct reply path (new: conversational response) ---- */
         if (reply) {
-            char * unescaped = json_unescape(reply);
+            char * unescaped = nj_unescape(reply);
             if (on_step) {
                 on_step(step, NULL, "reply", unescaped ? unescaped : reply, user_data);
             }
@@ -1149,7 +1098,7 @@ neuronos_agent_result_t neuronos_agent_chat(neuronos_agent_t * agent, const char
 
         /* ---- Final answer path (after tool use) ---- */
         if (answer) {
-            char * unescaped = json_unescape(answer);
+            char * unescaped = nj_unescape(answer);
             if (on_step) {
                 on_step(step, thought, "final_answer",
                         unescaped ? unescaped : answer, user_data);
@@ -1239,6 +1188,8 @@ cleanup:
     if (agent->memory && result.text) {
         neuronos_memory_recall_add(agent->memory, agent->session_id,
                                    "assistant", result.text, (int)(strlen(result.text) / 4));
+        /* Periodic GC: keep last 500 messages, discard older than 7 days */
+        neuronos_memory_recall_gc(agent->memory, agent->session_id, 500, 7 * 86400);
     }
 
     /* Free turn-local step history */

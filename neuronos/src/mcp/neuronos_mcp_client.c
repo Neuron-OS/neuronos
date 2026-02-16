@@ -17,6 +17,7 @@
  * ============================================================ */
 
 #include "neuronos/neuronos.h"
+#include "neuronos/neuronos_json.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -78,210 +79,7 @@ void neuronos_mcp_client_free(neuronos_mcp_client_t * client) { free(client); }
 #define MCP_MAX_TOOL_SCHEMA      8192
 #define MCP_READ_TIMEOUT_MS      30000  /* 30s timeout for responses */
 
-/* ============================================================
- * INTERNAL JSON HELPERS (minimal, no-dependency parser)
- *
- * These are deliberately simple: we only need to parse
- * well-formed JSON-RPC responses from trusted MCP servers.
- * ============================================================ */
-
-/* Find a string value in JSON by key. Returns pointer to first char
- * of value (inside quotes). Sets *len to string length. */
-static const char * json_find_str(const char * json, const char * key, int * len) {
-    if (!json || !key)
-        return NULL;
-
-    char pattern[256];
-    int plen = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    if (plen < 0 || plen >= (int)sizeof(pattern))
-        return NULL;
-
-    const char * p = json;
-    while ((p = strstr(p, pattern)) != NULL) {
-        p += plen;
-        /* Skip whitespace and colon */
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p != ':') continue;
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p == '"') {
-            p++; /* skip opening quote */
-            const char * start = p;
-            while (*p && *p != '"') {
-                if (*p == '\\' && *(p + 1))
-                    p++; /* skip escaped char */
-                p++;
-            }
-            if (len)
-                *len = (int)(p - start);
-            return start;
-        }
-        /* For non-string values, skip */
-    }
-    return NULL;
-}
-
-/* Find integer value in JSON by key */
-static int json_find_int(const char * json, const char * key) {
-    if (!json || !key)
-        return -1;
-
-    char pattern[256];
-    int plen = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    if (plen < 0 || plen >= (int)sizeof(pattern))
-        return -1;
-
-    const char * p = json;
-    while ((p = strstr(p, pattern)) != NULL) {
-        p += plen;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p != ':') continue;
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p == '-' || (*p >= '0' && *p <= '9'))
-            return atoi(p);
-    }
-    return -1;
-}
-
-/* Extract a JSON object value as a new string. Caller must free. */
-static char * json_extract_object(const char * json, const char * key) {
-    if (!json || !key)
-        return NULL;
-
-    char pattern[256];
-    int plen = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    if (plen < 0 || plen >= (int)sizeof(pattern))
-        return NULL;
-
-    const char * p = json;
-    while ((p = strstr(p, pattern)) != NULL) {
-        p += plen;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p != ':') continue;
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p == '{') {
-            int depth = 1;
-            const char * start = p;
-            p++;
-            while (*p && depth > 0) {
-                if (*p == '{')
-                    depth++;
-                else if (*p == '}')
-                    depth--;
-                else if (*p == '"') {
-                    p++;
-                    while (*p && *p != '"') {
-                        if (*p == '\\' && *(p + 1))
-                            p++;
-                        p++;
-                    }
-                }
-                if (depth > 0)
-                    p++;
-            }
-            if (depth == 0) {
-                size_t len = (size_t)(p - start + 1);
-                char * obj = malloc(len + 1);
-                if (obj) {
-                    memcpy(obj, start, len);
-                    obj[len] = '\0';
-                }
-                return obj;
-            }
-        }
-    }
-    return NULL;
-}
-
-/* Extract a JSON array value as a new string. Caller must free. */
-static char * json_extract_array(const char * json, const char * key) {
-    if (!json || !key)
-        return NULL;
-
-    char pattern[256];
-    int plen = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    if (plen < 0 || plen >= (int)sizeof(pattern))
-        return NULL;
-
-    const char * p = json;
-    while ((p = strstr(p, pattern)) != NULL) {
-        p += plen;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p != ':') continue;
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
-            p++;
-        if (*p == '[') {
-            int depth = 1;
-            const char * start = p;
-            p++;
-            while (*p && depth > 0) {
-                if (*p == '[')
-                    depth++;
-                else if (*p == ']')
-                    depth--;
-                else if (*p == '"') {
-                    p++;
-                    while (*p && *p != '"') {
-                        if (*p == '\\' && *(p + 1))
-                            p++;
-                        p++;
-                    }
-                }
-                if (depth > 0)
-                    p++;
-            }
-            if (depth == 0) {
-                size_t len = (size_t)(p - start + 1);
-                char * arr = malloc(len + 1);
-                if (arr) {
-                    memcpy(arr, start, len);
-                    arr[len] = '\0';
-                }
-                return arr;
-            }
-        }
-    }
-    return NULL;
-}
-
-/* Escape a string for JSON output. Caller must free. */
-static char * json_escape(const char * s) {
-    if (!s)
-        return strdup("null");
-    size_t cap = strlen(s) * 2 + 3;
-    char * out = malloc(cap);
-    if (!out)
-        return NULL;
-    size_t j = 0;
-    for (size_t i = 0; s[i] && j < cap - 2; i++) {
-        switch (s[i]) {
-            case '"':  out[j++] = '\\'; out[j++] = '"';  break;
-            case '\\': out[j++] = '\\'; out[j++] = '\\'; break;
-            case '\n': out[j++] = '\\'; out[j++] = 'n';  break;
-            case '\r': out[j++] = '\\'; out[j++] = 'r';  break;
-            case '\t': out[j++] = '\\'; out[j++] = 't';  break;
-            default:
-                if ((unsigned char)s[i] < 0x20) {
-                    j += (size_t)snprintf(out + j, cap - j, "\\u%04x", (unsigned char)s[i]);
-                } else {
-                    out[j++] = s[i];
-                }
-                break;
-        }
-    }
-    out[j] = '\0';
-    return out;
-}
+/* JSON helpers provided by neuronos/neuronos_json.h (nj_*) */
 
 /* ============================================================
  * INTERNAL STRUCTURES
@@ -426,7 +224,7 @@ static const char * mcp_client_request(mcp_server_conn_t * srv, const char * met
             continue;
 
         /* Check if this is a response (has "id") matching ours */
-        int resp_id = json_find_int(line, "id");
+        int resp_id = nj_find_int(line, "id", -1);
         if (resp_id == id) {
             return line; /* Matched! */
         }
@@ -434,7 +232,7 @@ static const char * mcp_client_request(mcp_server_conn_t * srv, const char * met
         /* This is either a notification or a response with different id.
          * Log and continue reading. */
         int method_len = 0;
-        const char * m = json_find_str(line, "method", &method_len);
+        const char * m = nj_find_str(line, "method", &method_len);
         if (m) {
             /* It's a notification — ignore (e.g., progress, log) */
             continue;
@@ -557,7 +355,7 @@ static int mcp_server_initialize(mcp_server_conn_t * srv) {
     /* Check for error */
     if (strstr(resp, "\"error\"")) {
         int elen = 0;
-        const char * emsg = json_find_str(resp, "message", &elen);
+        const char * emsg = nj_find_str(resp, "message", &elen);
         fprintf(stderr, "[mcp-client] Server '%s' error: %.*s\n",
                 srv->name, elen, emsg ? emsg : "unknown");
         return -1;
@@ -565,7 +363,7 @@ static int mcp_server_initialize(mcp_server_conn_t * srv) {
 
     /* Check protocol version in result */
     int vlen = 0;
-    const char * ver = json_find_str(resp, "protocolVersion", &vlen);
+    const char * ver = nj_find_str(resp, "protocolVersion", &vlen);
     if (ver) {
         fprintf(stderr, "[mcp-client] '%s' protocol: %.*s\n", srv->name, vlen, ver);
     }
@@ -591,13 +389,13 @@ static int mcp_discover_tools(mcp_server_conn_t * srv, mcp_tool_entry_t * tools,
     }
 
     /* Extract tools array from result */
-    char * result = json_extract_object(resp, "result");
+    char * result = nj_extract_object(resp, "result");
     if (!result) {
         fprintf(stderr, "[mcp-client] No result in tools/list response from '%s'\n", srv->name);
         return 0;
     }
 
-    char * tools_arr = json_extract_array(result, "tools");
+    char * tools_arr = nj_extract_array(result, "tools");
     free(result);
     if (!tools_arr) {
         fprintf(stderr, "[mcp-client] No tools array in response from '%s'\n", srv->name);
@@ -650,7 +448,7 @@ static int mcp_discover_tools(mcp_server_conn_t * srv, mcp_tool_entry_t * tools,
 
         /* Parse name */
         int name_len = 0;
-        const char * name = json_find_str(tool_json, "name", &name_len);
+        const char * name = nj_find_str(tool_json, "name", &name_len);
         if (name && name_len > 0) {
             mcp_tool_entry_t * t = &tools[count];
             int cpy = name_len < MCP_MAX_TOOL_NAME - 1 ? name_len : MCP_MAX_TOOL_NAME - 1;
@@ -659,7 +457,7 @@ static int mcp_discover_tools(mcp_server_conn_t * srv, mcp_tool_entry_t * tools,
 
             /* Parse description */
             int desc_len = 0;
-            const char * desc = json_find_str(tool_json, "description", &desc_len);
+            const char * desc = nj_find_str(tool_json, "description", &desc_len);
             if (desc && desc_len > 0) {
                 int dcpy = desc_len < MCP_MAX_TOOL_DESC - 1 ? desc_len : MCP_MAX_TOOL_DESC - 1;
                 memcpy(t->description, desc, (size_t)dcpy);
@@ -669,7 +467,7 @@ static int mcp_discover_tools(mcp_server_conn_t * srv, mcp_tool_entry_t * tools,
             }
 
             /* Parse inputSchema */
-            char * schema = json_extract_object(tool_json, "inputSchema");
+            char * schema = nj_extract_object(tool_json, "inputSchema");
             if (schema) {
                 size_t slen = strlen(schema);
                 if (slen < MCP_MAX_TOOL_SCHEMA) {
@@ -969,6 +767,7 @@ int neuronos_mcp_client_add_server(neuronos_mcp_client_t * client,
     /* Copy args */
     if (config->args && config->n_args > 0) {
         srv->args = calloc((size_t)config->n_args, sizeof(char *));
+        if (!srv->args) return -1;
         srv->n_args = config->n_args;
         for (int i = 0; i < config->n_args; i++) {
             srv->args[i] = config->args[i] ? strdup(config->args[i]) : NULL;
@@ -978,6 +777,7 @@ int neuronos_mcp_client_add_server(neuronos_mcp_client_t * client,
     /* Copy env */
     if (config->env && config->n_env > 0) {
         srv->env = calloc((size_t)config->n_env, sizeof(char *));
+        if (!srv->env) return -1;
         srv->n_env = config->n_env;
         for (int i = 0; i < config->n_env; i++) {
             srv->env[i] = config->env[i] ? strdup(config->env[i]) : NULL;
@@ -1118,7 +918,7 @@ char * neuronos_mcp_client_call_tool(neuronos_mcp_client_t * client,
     }
 
     /* Build tools/call params */
-    char * esc_name = json_escape(tool_name);
+    char * esc_name = nj_escape(tool_name);
     char params[MCP_MAX_LINE];
     snprintf(params, sizeof(params),
              "{\"name\":\"%s\",\"arguments\":%s}",
@@ -1137,7 +937,7 @@ char * neuronos_mcp_client_call_tool(neuronos_mcp_client_t * client,
     /* Check for error */
     if (strstr(resp, "\"error\"") && !strstr(resp, "\"isError\"")) {
         int elen = 0;
-        const char * emsg = json_find_str(resp, "message", &elen);
+        const char * emsg = nj_find_str(resp, "message", &elen);
         if (emsg) {
             char * err = malloc((size_t)(elen + 32));
             if (err) {
@@ -1149,11 +949,11 @@ char * neuronos_mcp_client_call_tool(neuronos_mcp_client_t * client,
     }
 
     /* Extract text content from result.content[0].text */
-    char * result_obj = json_extract_object(resp, "result");
+    char * result_obj = nj_extract_object(resp, "result");
     if (!result_obj) {
         /* Try direct text extraction */
         int tlen = 0;
-        const char * text = json_find_str(resp, "text", &tlen);
+        const char * text = nj_find_str(resp, "text", &tlen);
         if (text && tlen > 0) {
             char * out = malloc((size_t)(tlen + 1));
             if (out) {
@@ -1167,7 +967,7 @@ char * neuronos_mcp_client_call_tool(neuronos_mcp_client_t * client,
 
     /* Look for text in content array */
     int tlen = 0;
-    const char * text = json_find_str(result_obj, "text", &tlen);
+    const char * text = nj_find_str(result_obj, "text", &tlen);
     if (text && tlen > 0) {
         char * out = malloc((size_t)(tlen + 1));
         if (out) {
@@ -1216,7 +1016,7 @@ int neuronos_mcp_client_load_config(neuronos_mcp_client_t * client,
     fprintf(stderr, "[mcp-client] Loading config from %s (%zu bytes)\n", config_path, nread);
 
     /* Extract mcpServers object */
-    char * servers_obj = json_extract_object(json, "mcpServers");
+    char * servers_obj = nj_extract_object(json, "mcpServers");
     if (!servers_obj) {
         fprintf(stderr, "[mcp-client] No 'mcpServers' key in config\n");
         free(json);
@@ -1285,7 +1085,7 @@ int neuronos_mcp_client_load_config(neuronos_mcp_client_t * client,
 
         /* Extract command */
         int cmd_len = 0;
-        const char * cmd = json_find_str(srv_json, "command", &cmd_len);
+        const char * cmd = nj_find_str(srv_json, "command", &cmd_len);
 
         if (cmd && cmd_len > 0) {
             char server_name[128] = {0};
@@ -1299,7 +1099,7 @@ int neuronos_mcp_client_load_config(neuronos_mcp_client_t * client,
             /* Parse args array */
             char ** args = NULL;
             int n_args = 0;
-            char * args_arr = json_extract_array(srv_json, "args");
+            char * args_arr = nj_extract_array(srv_json, "args");
             if (args_arr) {
                 n_args = parse_string_array(args_arr, &args);
                 free(args_arr);
@@ -1308,7 +1108,7 @@ int neuronos_mcp_client_load_config(neuronos_mcp_client_t * client,
             /* Parse env object */
             char ** env = NULL;
             int n_env = 0;
-            char * env_obj = json_extract_object(srv_json, "env");
+            char * env_obj = nj_extract_object(srv_json, "env");
             if (env_obj) {
                 n_env = parse_env_object(env_obj, &env);
                 free(env_obj);
