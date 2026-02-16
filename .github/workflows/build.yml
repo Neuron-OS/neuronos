@@ -177,7 +177,8 @@ jobs:
             -DBITNET_X86_TL2=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_OPENMP=OFF \
-            -DNEURONOS_BUILD_TESTS=OFF
+            -DNEURONOS_BUILD_TESTS=OFF \
+            -DNEURONOS_VULKAN=OFF
 
       # ════════════════════════════════════════════
       # Compile
