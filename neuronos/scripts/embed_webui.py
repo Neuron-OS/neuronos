@@ -78,8 +78,8 @@ def main():
     with open(output_path, 'w') as f:
         f.write('\n'.join(lines))
 
-    print(f"Embedded {os.path.basename(input_path)} → {os.path.basename(output_path)} "
-          f"({raw_size} → {len(data)} bytes{' gzipped' if use_gzip else ''})")
+    print(f"Embedded {os.path.basename(input_path)} -> {os.path.basename(output_path)} "
+          f"({raw_size} -> {len(data)} bytes{' gzipped' if use_gzip else ''})")
 
 if __name__ == '__main__':
     main()
