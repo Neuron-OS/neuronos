@@ -42,22 +42,30 @@ Noted. I'll remember the March 15 deadline.
 
 ## Quick Start
 
-**One-command install** (Linux, macOS, Windows WSL):
+**Universal Install** (Linux, macOS, Android, Windows via WSL):
 
 ```bash
-curl -fsSL https://neuronos.dev/install | bash
+curl -fsSL https://neuronos.dev/install.sh | sh
 ```
 
-The installer detects your hardware (CPU features, RAM, GPU), downloads the optimal ternary model, and sets up everything automatically.
+This single command will:
+1.  **Detect your OS** (Debian, Fedora, Arch, macOS, Android/Termux).
+2.  **Install Dependencies** (Vulkan SDK, CMake, Compilers) automatically.
+3.  **Build & Install** `neuronos` optimized for your hardware.
+4.  **Download** the best 1.58-bit model for your RAM.
 
-**Or build from source:**
+**Manual Build**:
 
 ```bash
-git clone https://github.com/neuronos-project/neuronos
+git clone https://github.com/Neuron-OS/neuronos
 cd neuronos
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-./build/bin/neuronos
+./install.sh --build
+```
+
+**Web/WASM Build**:
+
+```bash
+./install.sh --wasm
 ```
 
 ## Features
@@ -130,16 +138,13 @@ cmake --build build -j$(nproc)
 
 ## Supported Hardware
 
-| Hardware | Backend | Min RAM | Status |
-|----------|---------|---------|--------|
-| Intel Haswell+ (2013+) | AVX2 | 1.5 GB | ✅ |
-| Intel Alder Lake+ (2021+) | AVX-VNNI | 1.5 GB | ✅ |
-| Apple M1/M2/M3/M4 | ARM NEON | 1.5 GB | ✅ |
-| Raspberry Pi 4/5 | ARM NEON | 1.5 GB | ✅ |
-| Any CPU | Scalar (C pure) | 1.5 GB | ✅ |
-| NVIDIA GPU | CUDA | 4 GB VRAM | ✅ (Q4_K_M) |
-| Any GPU | Vulkan | — | Planned |
-| Browser | WASM | — | Planned |
+| Platform | CPU (Avx2/ARM) | GPU (Vulkan) | NPU | Web (WASM) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Linux** | ✅ | ✅ | 🚧 | ✅ |
+| **macOS** | ✅ | ✅ (MoltenVK) | 🚧 | ✅ |
+| **Windows** | ✅ | ✅ | 🚧 | ✅ |
+| **Android** | ✅ | ✅ | 🚧 | ✅ |
+| **iOS** | - | - | - | ✅ (Safari) |
 
 ## Usage
 

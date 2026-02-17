@@ -55,3 +55,4 @@ build-static/
 build-cuda/
 build-gpu/
 build-test/
+build_test/

@@ -175,8 +175,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DBITNET_X86_TL2=OFF `
             -DBUILD_SHARED_LIBS=OFF `
-            -DNEURONOS_VULKAN=ON \
-            -DNEURONOS_CUDA=OFF \
+            -DNEURONOS_VULKAN=OFF `
+            -DNEURONOS_CUDA=OFF `
             -DGGML_CUDA=OFF
 
       - name: Configure (Android NDK)
